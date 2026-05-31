@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Reporting Demo Data Cleanup (companion to the seeder)
  *

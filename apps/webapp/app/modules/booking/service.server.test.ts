@@ -316,6 +316,8 @@ describe("createBooking", () => {
         originalTo: futureToDate,
         status: "DRAFT",
         assets: { connect: [{ id: "asset-1" }, { id: "asset-2" }] },
+        // SQLite: createdAt has no @default(now()), must be supplied explicitly
+        createdAt: expect.any(Date),
       },
       include: {
         custodianUser: true,
@@ -362,6 +364,8 @@ describe("createBooking", () => {
         originalTo: futureToDate,
         status: "DRAFT",
         assets: { connect: [{ id: "asset-1" }, { id: "asset-2" }] },
+        // SQLite: createdAt has no @default(now()), must be supplied explicitly
+        createdAt: expect.any(Date),
       },
       include: {
         custodianUser: true,
@@ -440,11 +444,12 @@ describe("partialCheckinBooking", () => {
     });
 
     // Verify partial check-in record created
+    // SQLite: assetIds is stored as a JSON string, not a native array
     expect(db.partialBookingCheckin.create).toHaveBeenCalledWith({
       data: {
         bookingId: "booking-1",
         checkedInById: "user-1",
-        assetIds: ["asset-1", "asset-2"],
+        assetIds: JSON.stringify(["asset-1", "asset-2"]),
         checkinCount: 2,
       },
     });
@@ -3111,7 +3116,7 @@ describe("getOngoingBookingForAsset", () => {
         status: { in: [BookingStatus.ONGOING, BookingStatus.OVERDUE] },
         organizationId: "org-1",
         assets: { some: { id: "asset-1" } },
-        partialCheckins: { none: { assetIds: { has: "asset-1" } } },
+        partialCheckins: { none: { assetIds: { contains: '"asset-1"' } } },
       },
     });
     expect(result).toEqual(mockBooking);
@@ -3140,7 +3145,7 @@ describe("getOngoingBookingForAsset", () => {
         status: { in: [BookingStatus.ONGOING, BookingStatus.OVERDUE] },
         organizationId: "org-1",
         assets: { some: { id: "asset-2" } },
-        partialCheckins: { none: { assetIds: { has: "asset-2" } } },
+        partialCheckins: { none: { assetIds: { contains: '"asset-2"' } } },
       },
     });
     expect(result).toEqual(mockBooking);
@@ -3164,7 +3169,7 @@ describe("getOngoingBookingForAsset", () => {
         status: { in: [BookingStatus.ONGOING, BookingStatus.OVERDUE] },
         organizationId: "org-1",
         assets: { some: { id: "asset-3" } },
-        partialCheckins: { none: { assetIds: { has: "asset-3" } } },
+        partialCheckins: { none: { assetIds: { contains: '"asset-3"' } } },
       },
     });
     expect(result).toBeNull();
@@ -3186,7 +3191,7 @@ describe("getOngoingBookingForAsset", () => {
         status: { in: [BookingStatus.ONGOING, BookingStatus.OVERDUE] },
         organizationId: "org-1",
         assets: { some: { id: "asset-4" } },
-        partialCheckins: { none: { assetIds: { has: "asset-4" } } },
+        partialCheckins: { none: { assetIds: { contains: '"asset-4"' } } },
       },
     });
     expect(result).toBeNull();
@@ -3209,7 +3214,7 @@ describe("getOngoingBookingForAsset", () => {
         status: { in: [BookingStatus.ONGOING, BookingStatus.OVERDUE] },
         organizationId: "org-1",
         assets: { some: { id: "asset-5" } },
-        partialCheckins: { none: { assetIds: { has: "asset-5" } } },
+        partialCheckins: { none: { assetIds: { contains: '"asset-5"' } } },
       },
     });
   });
@@ -3230,7 +3235,7 @@ describe("getOngoingBookingForAsset", () => {
         status: { in: [BookingStatus.ONGOING, BookingStatus.OVERDUE] },
         organizationId: "org-2",
         assets: { some: { id: "asset-6" } },
-        partialCheckins: { none: { assetIds: { has: "asset-6" } } },
+        partialCheckins: { none: { assetIds: { contains: '"asset-6"' } } },
       },
     });
   });
@@ -3277,7 +3282,7 @@ describe("getOngoingBookingForAsset", () => {
         status: { in: [BookingStatus.ONGOING, BookingStatus.OVERDUE] },
         organizationId: "org-1",
         assets: { some: { id: "asset-8" } },
-        partialCheckins: { none: { assetIds: { has: "asset-8" } } },
+        partialCheckins: { none: { assetIds: { contains: '"asset-8"' } } },
       },
     });
     expect(result).toEqual(checkedOutBooking);

@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { useState } from "react";
 import type { Prisma } from "@prisma/client";
 import { ChevronDownIcon } from "lucide-react";

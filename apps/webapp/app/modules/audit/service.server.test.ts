@@ -788,9 +788,10 @@ describe("audit service", () => {
           currentSearchParams: "s=camera",
         });
 
+        // SQLite: mode: "insensitive" removed — SQLite LIKE is case-insensitive by default
         expect(where.OR).toEqual([
-          { name: { contains: "camera", mode: "insensitive" } },
-          { description: { contains: "camera", mode: "insensitive" } },
+          { name: { contains: "camera" } },
+          { description: { contains: "camera" } },
         ]);
       });
 

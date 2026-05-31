@@ -1,14 +1,5 @@
 import { Roles, AssetIndexMode, OrganizationRoles } from "@prisma/client";
-
-import { matchRequestUrl, http, HttpResponse } from "msw";
-import { server } from "@mocks";
-import {
-  SUPABASE_URL,
-  SUPABASE_AUTH_TOKEN_API,
-  SUPABASE_AUTH_ADMIN_USER_API,
-  authSession,
-  authAccount,
-} from "@mocks/handlers";
+import { describe, expect, it, vitest, beforeEach } from "vitest";
 import {
   ORGANIZATION_ID,
   USER_EMAIL,
@@ -16,7 +7,12 @@ import {
   USER_PASSWORD,
 } from "@mocks/user";
 import { db } from "~/database/db.server";
-
+import {
+  createEmailAuthAccount,
+  confirmExistingAuthAccount,
+  signInWithEmail,
+  deleteAuthAccount,
+} from "~/modules/auth/service.server";
 import { USER_WITH_SSO_DETAILS_SELECT } from "./fields";
 import {
   createUserAccountForTesting,
@@ -53,194 +49,114 @@ vitest.mock("~/modules/asset-index-settings/service.server", () => ({
   ensureAssetIndexModeForRole: vitest.fn().mockResolvedValue(undefined),
 }));
 
+// why: auth service uses real DB/bcrypt under the hood; mock it so unit tests
+// focus on user-service orchestration without bcrypt/session overhead
+vitest.mock("~/modules/auth/service.server", () => ({
+  createEmailAuthAccount: vitest.fn(),
+  confirmExistingAuthAccount: vitest.fn(),
+  signInWithEmail: vitest.fn(),
+  deleteAuthAccount: vitest.fn().mockResolvedValue(undefined),
+  updateAccountPassword: vitest.fn().mockResolvedValue(undefined),
+  signUpWithEmailPass: vitest.fn(),
+}));
+
+const authAccount = { id: USER_ID, email: USER_EMAIL };
+const authSession = {
+  refreshToken: "valid",
+  accessToken: "valid",
+  userId: USER_ID,
+  email: USER_EMAIL,
+  expiresIn: -1,
+  expiresAt: -1,
+};
 const username = `test-user-${USER_ID}`;
 
 describe(createUserAccountForTesting.name, () => {
+  beforeEach(() => {
+    vitest.clearAllMocks();
+  });
+
   it("should return null if no auth account created", async () => {
-    expect.assertions(3);
-    const fetchAuthAdminUserAPI = new Map();
-    server.events.on("request:start", ({ request, requestId }) => {
-      const matchesMethod = request.method === "POST";
-      const matchesUrl = matchRequestUrl(
-        new URL(request.url),
-        SUPABASE_AUTH_ADMIN_USER_API,
-        SUPABASE_URL
-      ).matches;
-      if (matchesMethod && matchesUrl)
-        fetchAuthAdminUserAPI.set(requestId, request.clone());
-    });
-    // https://mswjs.io/docs/api/setup-server/use#one-time-override
-    server.use(
-      http.post(
-        `${SUPABASE_URL}${SUPABASE_AUTH_ADMIN_USER_API}`,
-        () =>
-          HttpResponse.json(
-            { message: "create-account-error", status: 400 },
-            { status: 400 }
-          ),
-        { once: true }
-      )
+    (createEmailAuthAccount as ReturnType<typeof vitest.fn>).mockRejectedValue(
+      new Error("create-account-error")
     );
+
     const result = await createUserAccountForTesting(
       USER_EMAIL,
       USER_PASSWORD,
       username
     );
-    server.events.removeAllListeners();
+
     expect(result).toBeNull();
-    expect(fetchAuthAdminUserAPI.size).toEqual(1);
-    const [request] = fetchAuthAdminUserAPI.values();
-    expect(await request.json()).toEqual({
-      email: USER_EMAIL,
-      password: USER_PASSWORD,
-      email_confirm: true,
-    });
+    expect(createEmailAuthAccount).toHaveBeenCalledWith(
+      USER_EMAIL,
+      USER_PASSWORD
+    );
   });
+
   it("should return null and delete auth account if unable to sign in", async () => {
-    expect.assertions(5);
-    const fetchAuthTokenAPI = new Map();
-    const fetchAuthAdminUserAPI = new Map();
-    server.events.on("request:start", ({ request, requestId }) => {
-      const matchesMethod = request.method === "POST";
-      const matchesUrl = matchRequestUrl(
-        new URL(request.url),
-        SUPABASE_AUTH_TOKEN_API,
-        SUPABASE_URL
-      ).matches;
-      if (matchesMethod && matchesUrl)
-        fetchAuthTokenAPI.set(requestId, request.clone());
-    });
-    server.events.on("request:start", ({ request, requestId }) => {
-      const matchesMethod = request.method === "DELETE";
-      const matchesUrl = matchRequestUrl(
-        new URL(request.url),
-        `${SUPABASE_AUTH_ADMIN_USER_API}/:userId`,
-        SUPABASE_URL
-      ).matches;
-      if (matchesMethod && matchesUrl)
-        fetchAuthAdminUserAPI.set(requestId, request.clone());
-    });
-    server.use(
-      http.post(
-        `${SUPABASE_URL}${SUPABASE_AUTH_TOKEN_API}`,
-        () =>
-          HttpResponse.json(
-            { message: "sign-in-error", status: 400 },
-            { status: 400 }
-          ),
-        { once: true }
-      )
+    (createEmailAuthAccount as ReturnType<typeof vitest.fn>).mockResolvedValue(
+      authAccount
     );
+    (signInWithEmail as ReturnType<typeof vitest.fn>).mockRejectedValue(
+      new Error("sign-in-error")
+    );
+
     const result = await createUserAccountForTesting(
       USER_EMAIL,
       USER_PASSWORD,
       username
     );
-    server.events.removeAllListeners();
+
     expect(result).toBeNull();
-    expect(fetchAuthTokenAPI.size).toEqual(1);
-    const [signInRequest] = fetchAuthTokenAPI.values();
-    expect(await signInRequest.json()).toEqual({
-      email: USER_EMAIL,
-      password: USER_PASSWORD,
-      gotrue_meta_security: {},
-    });
-    expect(fetchAuthAdminUserAPI.size).toEqual(1);
-    // expect call delete auth account with the expected user id
-    const [authAdminUserReq] = fetchAuthAdminUserAPI.values();
-    expect(new URL(authAdminUserReq.url).pathname).toEqual(
-      `${SUPABASE_AUTH_ADMIN_USER_API}/${USER_ID}`
-    );
+    expect(deleteAuthAccount).toHaveBeenCalledWith(USER_ID);
   });
+
   it("should return null and delete auth account if unable to create user in database", async () => {
-    expect.assertions(4);
-    const fetchAuthTokenAPI = new Map();
-    const fetchAuthAdminUserAPI = new Map();
-    server.events.on("request:start", ({ request, requestId }) => {
-      const matchesMethod = request.method === "POST";
-      const matchesUrl = matchRequestUrl(
-        new URL(request.url),
-        SUPABASE_AUTH_TOKEN_API,
-        SUPABASE_URL
-      ).matches;
-      if (matchesMethod && matchesUrl)
-        fetchAuthTokenAPI.set(requestId, request.clone());
-    });
-    server.events.on("request:start", ({ request, requestId }) => {
-      const matchesMethod = request.method === "DELETE";
-      const matchesUrl = matchRequestUrl(
-        new URL(request.url),
-        `${SUPABASE_AUTH_ADMIN_USER_API}/:userId`,
-        SUPABASE_URL
-      ).matches;
-      if (matchesMethod && matchesUrl)
-        fetchAuthAdminUserAPI.set(requestId, request.clone());
-    });
+    (createEmailAuthAccount as ReturnType<typeof vitest.fn>).mockResolvedValue(
+      authAccount
+    );
+    (signInWithEmail as ReturnType<typeof vitest.fn>).mockResolvedValue(
+      authSession
+    );
     //@ts-expect-error missing vitest type
     db.user.create.mockResolvedValue(null);
+
     const result = await createUserAccountForTesting(
       USER_EMAIL,
       USER_PASSWORD,
       username
     );
-    server.events.removeAllListeners();
-    expect(result).toBeNull();
-    expect(fetchAuthTokenAPI.size).toEqual(1);
-    expect(fetchAuthAdminUserAPI.size).toEqual(1);
-    // expect call delete auth account with the expected user id
-    const [authAdminUserReq] = fetchAuthAdminUserAPI.values();
-    expect(new URL(authAdminUserReq.url).pathname).toEqual(
-      `${SUPABASE_AUTH_ADMIN_USER_API}/${USER_ID}`
-    );
-  });
-  it("should create an account", async () => {
-    expect.assertions(4);
-    const fetchAuthAdminUserAPI = new Map();
-    const fetchAuthTokenAPI = new Map();
-    server.events.on("request:start", ({ request, requestId }) => {
-      const matchesMethod = request.method === "POST";
-      const matchesUrl = matchRequestUrl(
-        new URL(request.url),
-        SUPABASE_AUTH_ADMIN_USER_API,
-        SUPABASE_URL
-      ).matches;
-      if (matchesMethod && matchesUrl)
-        fetchAuthAdminUserAPI.set(requestId, request.clone());
-    });
-    server.events.on("request:start", ({ request, requestId }) => {
-      const matchesMethod = request.method === "POST";
-      const matchesUrl = matchRequestUrl(
-        new URL(request.url),
-        SUPABASE_AUTH_TOKEN_API,
-        SUPABASE_URL
-      ).matches;
-      if (matchesMethod && matchesUrl)
-        fetchAuthTokenAPI.set(requestId, request.clone());
-    });
 
+    expect(result).toBeNull();
+    expect(deleteAuthAccount).toHaveBeenCalledWith(USER_ID);
+  });
+
+  it("should create an account", async () => {
+    (createEmailAuthAccount as ReturnType<typeof vitest.fn>).mockResolvedValue(
+      authAccount
+    );
+    (signInWithEmail as ReturnType<typeof vitest.fn>).mockResolvedValue(
+      authSession
+    );
     //@ts-expect-error missing vitest type
     db.user.create.mockResolvedValue({
       id: USER_ID,
       email: USER_EMAIL,
       username: username,
-      organizations: [
-        {
-          id: "org-id",
-        },
-      ],
+      organizations: [{ id: "org-id" }],
     });
-    // mock db transaction passing the db instance
     //@ts-expect-error missing vitest type
     db.$transaction.mockImplementationOnce((callback) => callback(db));
+
     const result = await createUserAccountForTesting(
       USER_EMAIL,
       USER_PASSWORD,
       username
     );
 
-    // we don't want to test the implementation of the function
+    // normalize the timestamp so the snapshot is stable
     result!.expiresAt = -1;
-    server.events.removeAllListeners();
 
     expect(db.user.create).toBeCalledWith({
       data: {
@@ -250,12 +166,11 @@ describe(createUserAccountForTesting.name, () => {
         firstName: undefined,
         lastName: undefined,
         createdWithInvite: undefined,
-        // After the last changes because of SSO we dont need this anymore
         organizations: {
           create: [
             {
               name: "Personal",
-              hasSequentialIdsMigrated: true, // New personal organizations don't need migration
+              hasSequentialIdsMigrated: true,
               categories: {
                 create: defaultUserCategories.map((c) => ({
                   ...c,
@@ -296,8 +211,6 @@ describe(createUserAccountForTesting.name, () => {
       },
     });
     expect(result).toEqual(authSession);
-    expect(fetchAuthAdminUserAPI.size).toEqual(1);
-    expect(fetchAuthTokenAPI.size).toEqual(1);
   });
 });
 
@@ -307,35 +220,25 @@ const newUserMock = {
   organizations: [{ id: ORGANIZATION_ID }],
 };
 
-/**
- * Tests for the invite acceptance flow in `createUserOrAttachOrg`.
- *
- * Covers the fallback logic that handles the "limbo" state: a user who signed
- * up but never confirmed their email has a Supabase auth account but no Prisma
- * User record. When they later accept a team invite, `createEmailAuthAccount`
- * fails (email exists), so we fall back to `confirmExistingAuthAccount` to
- * confirm the existing auth account and create the Prisma User.
- */
 describe(createUserOrAttachOrg.name, () => {
   beforeEach(() => {
     vitest.clearAllMocks();
-    // Default: no existing Prisma user, no existing auth user
-    // @ts-expect-error missing vitest type
+    //@ts-expect-error missing vitest type
     db.user.findFirst.mockResolvedValue(null);
-    // @ts-expect-error missing vitest type
-    db.$queryRaw.mockResolvedValue([]);
-    // @ts-expect-error missing vitest type
+    //@ts-expect-error missing vitest type
     db.user.create.mockResolvedValue(newUserMock);
-    // @ts-expect-error missing vitest type
+    //@ts-expect-error missing vitest type
     db.$transaction.mockImplementation((callback: any) => callback(db));
+    (createEmailAuthAccount as ReturnType<typeof vitest.fn>).mockResolvedValue(
+      authAccount
+    );
+    (
+      confirmExistingAuthAccount as ReturnType<typeof vitest.fn>
+    ).mockResolvedValue(authAccount);
   });
 
-  afterEach(() => {
-    server.events.removeAllListeners();
-  });
-
-  /** Happy path: brand-new user with no prior Supabase account */
-  it("creates a new user when no Prisma user and no Supabase account exists", async () => {
+  /** Happy path: brand-new user with no prior auth account */
+  it("creates a new user when no Prisma user exists", async () => {
     const result = await createUserOrAttachOrg({
       email: USER_EMAIL,
       organizationId: ORGANIZATION_ID,
@@ -349,30 +252,11 @@ describe(createUserOrAttachOrg.name, () => {
     expect(db.user.create).toHaveBeenCalled();
   });
 
-  /** The "limbo" bug: unconfirmed Supabase account exists, no Prisma User */
+  /** Falls back to confirming existing account when createEmailAuthAccount fails */
   it("falls back to confirming existing auth account when createEmailAuthAccount fails", async () => {
-    // Override: createEmailAuthAccount fails (email already in Supabase)
-    server.use(
-      http.post(
-        `${SUPABASE_URL}${SUPABASE_AUTH_ADMIN_USER_API}`,
-        () =>
-          HttpResponse.json(
-            { message: "User already registered", status: 400 },
-            { status: 400 }
-          ),
-        { once: true }
-      ),
-      // confirmExistingAuthAccount calls updateUserById (PUT)
-      http.put(
-        `${SUPABASE_URL}${SUPABASE_AUTH_ADMIN_USER_API}/:id`,
-        () => HttpResponse.json(authAccount, { status: 200 }),
-        { once: true }
-      )
+    (createEmailAuthAccount as ReturnType<typeof vitest.fn>).mockRejectedValue(
+      new Error("email already registered")
     );
-
-    // confirmExistingAuthAccount queries auth.users to find existing account
-    // @ts-expect-error missing vitest type
-    db.$queryRaw.mockResolvedValueOnce([{ id: USER_ID }]);
 
     const result = await createUserOrAttachOrg({
       email: USER_EMAIL,
@@ -384,28 +268,21 @@ describe(createUserOrAttachOrg.name, () => {
     });
 
     expect(result.id).toBe(USER_ID);
-    expect(db.$queryRaw).toHaveBeenCalled();
+    expect(confirmExistingAuthAccount).toHaveBeenCalledWith(
+      USER_EMAIL,
+      USER_PASSWORD
+    );
     expect(db.user.create).toHaveBeenCalled();
   });
 
   /** No auth account can be created or found — user gets a clear error */
   it("throws when both createEmailAuthAccount and confirmExistingAuthAccount fail", async () => {
-    // createEmailAuthAccount fails
-    server.use(
-      http.post(
-        `${SUPABASE_URL}${SUPABASE_AUTH_ADMIN_USER_API}`,
-        () =>
-          HttpResponse.json(
-            { message: "User already registered", status: 400 },
-            { status: 400 }
-          ),
-        { once: true }
-      )
+    (createEmailAuthAccount as ReturnType<typeof vitest.fn>).mockRejectedValue(
+      new Error("email already registered")
     );
-
-    // confirmExistingAuthAccount finds no auth user → returns null
-    // @ts-expect-error missing vitest type
-    db.$queryRaw.mockResolvedValueOnce([]);
+    (
+      confirmExistingAuthAccount as ReturnType<typeof vitest.fn>
+    ).mockResolvedValue(null);
 
     await expect(
       createUserOrAttachOrg({
@@ -430,7 +307,7 @@ describe(createUserOrAttachOrg.name, () => {
       userOrganizations: [],
     };
 
-    // @ts-expect-error missing vitest type
+    //@ts-expect-error missing vitest type
     db.user.findFirst.mockResolvedValueOnce(existingUser);
 
     const result = await createUserOrAttachOrg({
@@ -445,5 +322,6 @@ describe(createUserOrAttachOrg.name, () => {
     expect(result.id).toBe(USER_ID);
     expect(db.userOrganization.upsert).toHaveBeenCalled();
     expect(db.user.create).not.toHaveBeenCalled();
+    expect(createEmailAuthAccount).not.toHaveBeenCalled();
   });
 });

@@ -9,6 +9,7 @@ import {
   PermissionAction,
   PermissionEntity,
 } from "~/utils/permissions/permission.data";
+import { parseRoles } from "~/utils/roles";
 import { requirePermission } from "~/utils/roles.server";
 import { resolveUserDisplayName } from "~/utils/user";
 
@@ -36,9 +37,10 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       where: {
         organizationId,
         userId: { not: excludeUserId },
-        roles: {
-          hasSome: [OrganizationRoles.OWNER, OrganizationRoles.ADMIN],
-        },
+        OR: [
+          { roles: { contains: '"OWNER"' } },
+          { roles: { contains: '"ADMIN"' } },
+        ],
       },
       select: {
         roles: true,
@@ -59,7 +61,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
         id: uo.user.id,
         name: resolveUserDisplayName(uo.user),
         email: uo.user.email,
-        isOwner: uo.roles.includes(OrganizationRoles.OWNER),
+        isOwner: parseRoles(uo.roles).includes(OrganizationRoles.OWNER),
       }))
     );
   } catch (cause) {

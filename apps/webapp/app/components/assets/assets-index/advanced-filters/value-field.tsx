@@ -882,7 +882,14 @@ function CustomFieldEnumField({
 
   const options: EnumOption[] = useMemo(() => {
     const field = customFields.find((f) => f?.name === fieldName.slice(3));
-    return (field?.options || []).map((opt) => ({
+    // SQLite stores options as a JSON string — parse it to an array
+    const rawOptions = field?.options;
+    const parsedOptions: string[] = rawOptions
+      ? typeof rawOptions === "string"
+        ? (JSON.parse(rawOptions) as string[])
+        : (rawOptions as unknown as string[])
+      : [];
+    return parsedOptions.map((opt: string) => ({
       id: opt,
       label: opt,
     }));

@@ -99,7 +99,12 @@ export const CustomFieldForm = ({
   const zo = useZorm("NewQuestionWizardScreen", NewCustomFieldFormSchema);
   const disabled = isFormProcessing(navigation.state);
 
-  const [options, setOptions] = useState<Array<string>>(opts || []);
+  // SQLite stores options as a JSON string — parse it to an array
+  const [options, setOptions] = useState<Array<string>>(() => {
+    if (!opts) return [];
+    if (typeof opts === "string") return JSON.parse(opts) as string[];
+    return opts as unknown as string[];
+  });
   const [selectedType, setSelectedType] = useState<CustomFieldType>(
     type || "TEXT"
   );

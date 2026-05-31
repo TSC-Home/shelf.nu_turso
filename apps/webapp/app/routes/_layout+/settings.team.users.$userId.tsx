@@ -27,6 +27,7 @@ import {
   PermissionEntity,
 } from "~/utils/permissions/permission.data";
 import { userHasPermission } from "~/utils/permissions/permission.validator.client";
+import { parseRoles } from "~/utils/roles";
 import { requirePermission } from "~/utils/roles.server";
 import { organizationRolesMap } from "./settings.team";
 
@@ -152,7 +153,9 @@ export default function UserPage() {
   );
   const userOrgRole =
     organizationRolesMap[
-      currentOrgMembership?.roles[0] ?? user.userOrganizations[0].roles[0]
+      parseRoles(
+        currentOrgMembership?.roles ?? user.userOrganizations[0].roles
+      )[0]
     ];
   return (
     <>
@@ -199,8 +202,9 @@ export default function UserPage() {
             )}
             role={userOrgRole}
             roleEnum={
-              currentOrgMembership?.roles[0] ??
-              user.userOrganizations[0].roles[0]
+              parseRoles(
+                currentOrgMembership?.roles ?? user.userOrganizations[0].roles
+              )[0]
             }
           />
         </AbsolutePositionedHeaderActions>

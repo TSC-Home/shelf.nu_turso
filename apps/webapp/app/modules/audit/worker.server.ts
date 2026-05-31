@@ -1,6 +1,7 @@
 /* eslint-disable no-console */
 import { AuditStatus } from "@prisma/client";
-import type PgBoss from "pg-boss";
+/** Job shape from the custom node-cron scheduler (replaces pg-boss) */
+type SchedulerJob<T> = { data: T; id: string };
 import { db } from "~/database/db.server";
 import { ShelfError } from "~/utils/error";
 import { Logger } from "~/utils/logger";
@@ -17,7 +18,7 @@ import type { AuditSchedulerData } from "./types";
  * 24-hour reminder handler
  * Sends reminder email to assignees and schedules the next reminder (4h)
  */
-const reminder24h = async ({ data }: PgBoss.Job<AuditSchedulerData>) => {
+const reminder24h = async ({ data }: SchedulerJob<AuditSchedulerData>) => {
   const audit = await db.auditSession
     .findFirstOrThrow({
       // eslint-disable-next-line local-rules/require-org-scope-on-id-queries -- idor-safe: background pg-boss scheduler handler; AuditSchedulerData carries only the audit id (no user request / organizationId in scope). Lookup is keyed on the trusted job payload, not user input.
@@ -63,7 +64,7 @@ const reminder24h = async ({ data }: PgBoss.Job<AuditSchedulerData>) => {
  * 4-hour reminder handler
  * Sends reminder email to assignees and schedules the next reminder (1h)
  */
-const reminder4h = async ({ data }: PgBoss.Job<AuditSchedulerData>) => {
+const reminder4h = async ({ data }: SchedulerJob<AuditSchedulerData>) => {
   const audit = await db.auditSession
     .findFirstOrThrow({
       // eslint-disable-next-line local-rules/require-org-scope-on-id-queries -- idor-safe: background pg-boss scheduler handler; AuditSchedulerData carries only the audit id (no user request / organizationId in scope). Lookup is keyed on the trusted job payload, not user input.
@@ -109,7 +110,7 @@ const reminder4h = async ({ data }: PgBoss.Job<AuditSchedulerData>) => {
  * 1-hour reminder handler
  * Sends reminder email to assignees and schedules the overdue notice
  */
-const reminder1h = async ({ data }: PgBoss.Job<AuditSchedulerData>) => {
+const reminder1h = async ({ data }: SchedulerJob<AuditSchedulerData>) => {
   const audit = await db.auditSession
     .findFirstOrThrow({
       // eslint-disable-next-line local-rules/require-org-scope-on-id-queries -- idor-safe: background pg-boss scheduler handler; AuditSchedulerData carries only the audit id (no user request / organizationId in scope). Lookup is keyed on the trusted job payload, not user input.
@@ -155,7 +156,7 @@ const reminder1h = async ({ data }: PgBoss.Job<AuditSchedulerData>) => {
  * Sends overdue email to both creator and assignees
  * Does NOT change audit status (handled on frontend)
  */
-const overdueNotice = async ({ data }: PgBoss.Job<AuditSchedulerData>) => {
+const overdueNotice = async ({ data }: SchedulerJob<AuditSchedulerData>) => {
   const audit = await db.auditSession
     .findFirstOrThrow({
       // eslint-disable-next-line local-rules/require-org-scope-on-id-queries -- idor-safe: background pg-boss scheduler handler; AuditSchedulerData carries only the audit id (no user request / organizationId in scope). Lookup is keyed on the trusted job payload, not user input.
@@ -208,7 +209,7 @@ const overdueNotice = async ({ data }: PgBoss.Job<AuditSchedulerData>) => {
  */
 const event2HandlerMap: Record<
   AUDIT_SCHEDULER_EVENTS_ENUM,
-  (job: PgBoss.Job<AuditSchedulerData>) => Promise<void>
+  (job: SchedulerJob<AuditSchedulerData>) => Promise<void>
 > = {
   [AUDIT_SCHEDULER_EVENTS_ENUM.reminder24h]: reminder24h,
   [AUDIT_SCHEDULER_EVENTS_ENUM.reminder4h]: reminder4h,

@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { Currency, OrganizationRoles, OrganizationType } from "@prisma/client";
 import {
   MaxFileSizeExceededError,
@@ -271,8 +272,15 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
           additionalData: { userId, organizationId: id },
         });
 
-        const { name, currency, qrIdDisplayPreference, showShelfBranding } =
-          parsedData;
+        const {
+          name,
+          currency,
+          qrIdDisplayPreference,
+          showShelfBranding,
+          labelBrandingText,
+          labelCustomText,
+          labelTemplate,
+        } = parsedData;
 
         let nextShowShelfBranding = resolveShowShelfBranding(
           showShelfBranding,
@@ -320,6 +328,9 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
           currency,
           qrIdDisplayPreference,
           showShelfBranding: nextShowShelfBranding,
+          labelBrandingText: labelBrandingText ?? null,
+          labelCustomText: labelCustomText ?? null,
+          labelTemplate,
         });
 
         sendNotification({

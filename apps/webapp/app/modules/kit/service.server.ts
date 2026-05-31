@@ -21,7 +21,6 @@ import {
 import type { LoaderFunctionArgs } from "react-router";
 import invariant from "tiny-invariant";
 import { db } from "~/database/db.server";
-import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import {
   updateBarcodes,
   validateBarcodeUniqueness,
@@ -37,7 +36,6 @@ import {
   ShelfError,
   VALIDATION_ERROR,
 } from "~/utils/error";
-import { extractImageNameFromSupabaseUrl } from "~/utils/extract-image-name-from-supabase-url";
 import { getRedirectUrlFromRequest } from "~/utils/http";
 import { getCurrentSearchParams } from "~/utils/http.server";
 import { id } from "~/utils/id/id.server";
@@ -55,6 +53,7 @@ import {
   assertLocationBelongsToOrg,
   assertTeamMemberBelongsToOrg,
 } from "~/utils/org-validation.server";
+import { deleteAssetImage } from "~/utils/storage.server";
 import { createSignedUrl, parseFileFormData } from "~/utils/storage.server";
 import type { MergeInclude } from "~/utils/utils";
 import type { UpdateKitPayload } from "./types";
@@ -426,11 +425,11 @@ export async function getPaginatedAndFilterableKits<
       const searchTerm = search.toLowerCase().trim();
       where.OR = [
         // Search in kit name
-        { name: { contains: searchTerm, mode: "insensitive" } },
+        { name: { contains: searchTerm } },
         // Search in barcode values
         {
           barcodes: {
-            some: { value: { contains: searchTerm, mode: "insensitive" } },
+            some: { value: { contains: searchTerm } },
           },
         },
       ];
@@ -694,11 +693,11 @@ export async function getAssetsForKits({
       const searchTerm = search.toLowerCase().trim();
       where.OR = [
         // Search in asset title
-        { title: { contains: searchTerm, mode: "insensitive" } },
+        { title: { contains: searchTerm } },
         // Search in asset barcodes
         {
           barcodes: {
-            some: { value: { contains: searchTerm, mode: "insensitive" } },
+            some: { value: { contains: searchTerm } },
           },
         },
       ];
@@ -792,24 +791,7 @@ export async function deleteKitImage({
   bucketName?: string;
 }) {
   try {
-    const path = extractImageNameFromSupabaseUrl({ url, bucketName });
-    if (!path) {
-      throw new ShelfError({
-        cause: null,
-        message: "Cannot extract the image path from the URL",
-        additionalData: { url, bucketName },
-        label,
-      });
-    }
-
-    const { error } = await getSupabaseAdmin()
-      .storage.from(bucketName)
-      .remove([path]);
-
-    if (error) {
-      throw error;
-    }
-
+    await deleteAssetImage({ url, bucketName });
     return true;
   } catch (cause) {
     Logger.error(
@@ -1546,7 +1528,7 @@ export async function createKitsIfNotExists({
     for (const kit of kitNames) {
       const existingKit = await db.kit.findFirst({
         where: {
-          name: { equals: kit, mode: "insensitive" },
+          name: { equals: kit },
           organizationId,
         },
       });

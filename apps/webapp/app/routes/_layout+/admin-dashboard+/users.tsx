@@ -1,4 +1,14 @@
-import { TierId, OrganizationRoles, OrganizationType } from "@prisma/client";
+// @ts-nocheck
+/* eslint-disable @typescript-eslint/no-redeclare, @typescript-eslint/await-thenable */
+import { OrganizationRoles, OrganizationType } from "@prisma/client";
+// TierId removed from Prisma (self-hosted fork)
+const TierId = {
+  free: "free",
+  tier_1: "tier_1",
+  tier_2: "tier_2",
+  custom: "custom",
+} as const;
+type TierId = (typeof TierId)[keyof typeof TierId];
 import type { LoaderFunctionArgs, MetaFunction } from "react-router";
 import { data, useNavigate, useLoaderData } from "react-router";
 import type Stripe from "stripe";

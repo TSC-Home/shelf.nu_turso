@@ -17,6 +17,7 @@ import {
   PermissionEntity,
 } from "~/utils/permissions/permission.data";
 import { validatePermission } from "~/utils/permissions/permission.validator.server";
+import { parseRoles } from "~/utils/roles";
 import { isDemotion } from "~/utils/roles";
 import { randomUsernameFromEmail } from "~/utils/user";
 import {
@@ -325,7 +326,8 @@ export async function resolveUserAction(
         });
       }
 
-      const currentRole = targetUserOrg.roles[0];
+      // SQLite: roles is a JSON string — parse before indexing
+      const currentRole = parseRoles(targetUserOrg.roles)[0];
 
       /** Transfer entities on demotion */
       if (isDemotion(currentRole, newRole)) {

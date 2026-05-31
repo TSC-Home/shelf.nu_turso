@@ -4,22 +4,20 @@ import {
   OrganizationType,
   Roles,
 } from "@prisma/client";
-import type { Organization, Prisma, TierId, User } from "@prisma/client";
-import type Stripe from "stripe";
+import type { Organization, Prisma, User } from "@prisma/client";
 
 import { db } from "~/database/db.server";
 import { sendEmail } from "~/emails/mail.server";
+import type { TierId } from "~/modules/tier/service.server";
 import { DEFAULT_MAX_IMAGE_UPLOAD_SIZE } from "~/utils/constants";
 import { ADMIN_EMAIL } from "~/utils/env";
 import type { ErrorLabel } from "~/utils/error";
 import { isLikeShelfError, ShelfError } from "~/utils/error";
+import { parseRoles } from "~/utils/roles";
 import {
   createStripeCustomer,
   customerHasPaymentMethod,
-  getUserActiveSubscription,
-  getUserActiveSubscriptions,
   premiumIsEnabled,
-  transferSubscriptionToCustomer,
 } from "~/utils/stripe.server";
 import { resolveUserDisplayName } from "~/utils/user";
 import { newOwnerEmailText, previousOwnerEmailText } from "./email";
@@ -171,7 +169,8 @@ export async function createOrganization({
       userOrganizations: {
         create: {
           userId,
-          roles: [OrganizationRoles.OWNER],
+          // SQLite stores roles as a JSON string
+          roles: JSON.stringify([OrganizationRoles.OWNER]),
         },
       },
       owner: {
@@ -264,6 +263,9 @@ export async function updateOrganization({
   qrIdDisplayPreference,
   showShelfBranding,
   customEmailFooter,
+  labelBrandingText,
+  labelCustomText,
+  labelTemplate,
 }: Pick<Organization, "id"> & {
   currency?: Organization["currency"];
   name?: string;
@@ -278,6 +280,9 @@ export async function updateOrganization({
   qrIdDisplayPreference?: Organization["qrIdDisplayPreference"];
   showShelfBranding?: Organization["showShelfBranding"];
   customEmailFooter?: string | null;
+  labelBrandingText?: Organization["labelBrandingText"];
+  labelCustomText?: Organization["labelCustomText"];
+  labelTemplate?: Organization["labelTemplate"];
 }) {
   try {
     const data = {
@@ -291,6 +296,9 @@ export async function updateOrganization({
         showShelfBranding,
       }),
       ...(customEmailFooter !== undefined && { customEmailFooter }),
+      ...(labelBrandingText !== undefined && { labelBrandingText }),
+      ...(labelCustomText !== undefined && { labelCustomText }),
+      ...(labelTemplate !== undefined && { labelTemplate }),
       ...(ssoDetails && {
         ssoDetails: {
           update: ssoDetails,
@@ -374,14 +382,13 @@ const ORGANIZATION_SELECT_FIELDS = {
   selfServiceCanSeeBookings: true,
   baseUserCanSeeCustody: true,
   baseUserCanSeeBookings: true,
-  barcodesEnabled: true,
-  usedBarcodeTrial: true,
-  auditsEnabled: true,
-  usedAuditTrial: true,
   hasSequentialIdsMigrated: true,
   qrIdDisplayPreference: true,
   showShelfBranding: true,
   customEmailFooter: true,
+  labelBrandingText: true,
+  labelCustomText: true,
+  labelTemplate: true,
 };
 
 export type OrganizationFromUser = Prisma.OrganizationGetPayload<{
@@ -423,9 +430,11 @@ export async function getOrganizationAdminsEmails({
     const admins = await db.userOrganization.findMany({
       where: {
         organizationId,
-        roles: {
-          hasSome: [OrganizationRoles.OWNER, OrganizationRoles.ADMIN],
-        },
+        // SQLite: roles is a JSON string, use OR + contains for array membership
+        OR: [
+          { roles: { contains: `"${OrganizationRoles.OWNER}"` } },
+          { roles: { contains: `"${OrganizationRoles.ADMIN}"` } },
+        ],
       },
       select: {
         user: {
@@ -471,9 +480,11 @@ export async function getOrganizationAdminsForNotification({
     const admins = await db.userOrganization.findMany({
       where: {
         organizationId,
-        roles: {
-          hasSome: [OrganizationRoles.OWNER, OrganizationRoles.ADMIN],
-        },
+        // SQLite: roles is a JSON string, use OR + contains for array membership
+        OR: [
+          { roles: { contains: `"${OrganizationRoles.OWNER}"` } },
+          { roles: { contains: `"${OrganizationRoles.ADMIN}"` } },
+        ],
       },
       select: {
         user: {
@@ -549,56 +560,20 @@ export async function toggleWorkspaceDisabled({
   }
 }
 
-export async function toggleBarcodeEnabled({
-  organizationId,
-  barcodesEnabled,
-}: {
+/** Stub — barcode/audit trial fields removed in self-hosted SQLite fork. */
+export function toggleBarcodeEnabled(_args: {
   organizationId: string;
   barcodesEnabled: boolean;
-}) {
-  try {
-    return await db.organization.update({
-      where: { id: organizationId },
-      data: {
-        barcodesEnabled,
-        barcodesEnabledAt: barcodesEnabled ? new Date() : null,
-      },
-    });
-  } catch (cause) {
-    throw new ShelfError({
-      cause,
-      message:
-        "Something went wrong while toggling barcode functionality. Please try again or contact support.",
-      additionalData: { organizationId, barcodesEnabled },
-      label,
-    });
-  }
+}): Promise<void> {
+  return Promise.resolve();
 }
 
-export async function toggleAuditEnabled({
-  organizationId,
-  auditsEnabled,
-}: {
+/** Stub — barcode/audit trial fields removed in self-hosted SQLite fork. */
+export function toggleAuditEnabled(_args: {
   organizationId: string;
   auditsEnabled: boolean;
-}) {
-  try {
-    return await db.organization.update({
-      where: { id: organizationId },
-      data: {
-        auditsEnabled,
-        auditsEnabledAt: auditsEnabled ? new Date() : null,
-      },
-    });
-  } catch (cause) {
-    throw new ShelfError({
-      cause,
-      message:
-        "Something went wrong while toggling audit functionality. Please try again or contact support.",
-      additionalData: { organizationId, auditsEnabled },
-      label,
-    });
-  }
+}): Promise<void> {
+  return Promise.resolve();
 }
 
 /**
@@ -687,7 +662,11 @@ export async function getOrganizationAdmins({
   try {
     /** Get all the admins in current organization */
     const admins = await db.userOrganization.findMany({
-      where: { organizationId, roles: { has: OrganizationRoles.ADMIN } },
+      where: {
+        organizationId,
+        // SQLite: roles is a JSON string, use contains for membership check
+        roles: { contains: `"${OrganizationRoles.ADMIN}"` },
+      },
       select: {
         user: {
           select: {
@@ -760,7 +739,8 @@ export async function transferOwnership({
         organizationId: currentOrganization.id,
         OR: [
           { userId: newOwnerId },
-          { roles: { has: OrganizationRoles.OWNER } },
+          // SQLite: roles is a JSON string, use contains for membership check
+          { roles: { contains: `"${OrganizationRoles.OWNER}"` } },
         ],
       },
       select: {
@@ -773,17 +753,15 @@ export async function transferOwnership({
             displayName: true,
             email: true,
             roles: true,
-            customerId: true,
-            tierId: true,
-            usedFreeTrial: true,
           },
         },
         roles: true,
       },
     });
 
+    // SQLite: roles is a JSON string — parse before checking membership
     const currentOwnerUserOrg = userOrganization.find((userOrg) =>
-      userOrg.roles.includes(OrganizationRoles.OWNER)
+      parseRoles(userOrg.roles).includes(OrganizationRoles.OWNER)
     );
     /** Validate if the current user is a member of the organization */
     if (!currentOwnerUserOrg) {
@@ -832,22 +810,13 @@ export async function transferOwnership({
     // Check if new owner already has an active subscription (BLOCK transfer)
     // This applies regardless of whether subscription transfer is requested,
     // as we don't want two owners with separate active subscriptions
+    // NOTE: Stripe is not available in this SQLite build — premiumIsEnabled is false
     if (premiumIsEnabled) {
-      const newOwnerActiveSubscription =
-        await getUserActiveSubscription(newOwnerId);
-      if (newOwnerActiveSubscription) {
-        throw new ShelfError({
-          cause: null,
-          message:
-            "Cannot transfer ownership to a user who already has an active subscription.",
-          label,
-        });
-      }
+      // Subscription check is a no-op in this build
     }
 
-    // Track subscription transfer info for emails
-    let subscriptionTransferred = false;
-    const currentOwnerTierId: TierId = currentOwnerUserOrg.user.tierId;
+    // SQLite: tierId does not exist in this fork — use null as a no-op placeholder
+    const currentOwnerTierId: TierId | null = null;
 
     await db.$transaction(async (tx) => {
       /** Update the owner of the organization */
@@ -862,94 +831,26 @@ export async function transferOwnership({
       await tx.userOrganization.update({
         // eslint-disable-next-line local-rules/require-org-scope-on-id-queries -- idor-safe: currentOwnerUserOrg comes from the `userOrganization` findMany above scoped by `organizationId: currentOrganization.id` (lines 758-765), so this id is already org-proven
         where: { id: currentOwnerUserOrg.id },
-        data: { roles: { set: [OrganizationRoles.ADMIN] } },
+        // SQLite: roles is a JSON string — serialize as string instead of array
+        data: { roles: JSON.stringify([OrganizationRoles.ADMIN]) },
       });
 
       /** Update the role of new owner to OWNER */
       await tx.userOrganization.update({
         // eslint-disable-next-line local-rules/require-org-scope-on-id-queries -- idor-safe: newOwnerUserOrg comes from the `userOrganization` findMany above scoped by `organizationId: currentOrganization.id` (lines 758-765), so this id is already org-proven
         where: { id: newOwnerUserOrg.id },
-        data: { roles: { set: [OrganizationRoles.OWNER] } },
+        // SQLite: roles is a JSON string — serialize as string instead of array
+        data: { roles: JSON.stringify([OrganizationRoles.OWNER]) },
       });
     });
 
     // Handle subscription transfer AFTER the ownership transfer succeeds
-    // Wrapped in try/catch to ensure ownership transfer completes even if subscription transfer fails
+    // NOTE: Stripe is not available in this SQLite build — premiumIsEnabled is false,
+    // so this block is never executed. It remains as a no-op placeholder.
+    // why: use `let` so TypeScript does not narrow the type to `null` (which
+    // makes downstream `.message`/`.stack` accesses fail on type `never`)
     let subscriptionTransferError: Error | null = null;
-    if (premiumIsEnabled && transferSubscription) {
-      try {
-        const activeSubscriptions = await getUserActiveSubscriptions(
-          currentOwnerUserOrg.user.id
-        );
-
-        // Filter to subscriptions relevant to this workspace:
-        // - Tier subscriptions (always relevant)
-        // - Addon subscriptions linked to THIS workspace
-        const relevantSubscriptions = filterRelevantSubscriptions(
-          activeSubscriptions,
-          currentOrganization.id
-        );
-
-        if (relevantSubscriptions.length > 0) {
-          // Ensure new owner has a Stripe customer ID (only once)
-          let newOwnerCustomerId: string | null | undefined =
-            newOwnerUserOrg.user.customerId;
-          if (!newOwnerCustomerId) {
-            newOwnerCustomerId = await createStripeCustomer({
-              email: newOwnerUserOrg.user.email,
-              name: resolveUserDisplayName(newOwnerUserOrg.user),
-              userId: newOwnerId,
-            });
-          }
-
-          if (newOwnerCustomerId) {
-            // Transfer each relevant subscription
-            for (const sub of relevantSubscriptions) {
-              await transferSubscriptionToCustomer({
-                subscriptionId: sub.id,
-                newCustomerId: newOwnerCustomerId,
-              });
-            }
-
-            // Update tier if a tier subscription was transferred
-            const hasTierSubscription = relevantSubscriptions.some((sub) =>
-              isTierSubscription(sub)
-            );
-            if (hasTierSubscription) {
-              await updateUserTierId(newOwnerId, currentOwnerTierId);
-              await updateUserTierId(currentOwnerUserOrg.user.id, "free");
-            }
-
-            subscriptionTransferred = true;
-
-            // Transfer usedFreeTrial flag if original owner used it
-            // This prevents the new owner from starting another trial
-            if (currentOwnerUserOrg.user.usedFreeTrial) {
-              await db.user.update({
-                where: { id: newOwnerId },
-                data: { usedFreeTrial: true },
-                select: { id: true },
-              });
-            }
-
-            // Check if new owner has a payment method on their Stripe customer
-            // If not, set the warning flag so they see the banner
-            const hasPaymentMethod =
-              await customerHasPaymentMethod(newOwnerCustomerId);
-            if (!hasPaymentMethod) {
-              await db.user.update({
-                where: { id: newOwnerId },
-                data: { warnForNoPaymentMethod: true },
-                select: { id: true },
-              });
-            }
-          }
-        }
-      } catch (error) {
-        // Capture the error but don't throw - ownership transfer should still succeed
-        subscriptionTransferError = error as Error;
-      }
-    }
+    let subscriptionTransferred = false;
 
     /** Send email to new owner */
     sendEmail({
@@ -976,14 +877,17 @@ export async function transferOwnership({
 
     /** Send admin notification */
     if (ADMIN_EMAIL) {
-      const subscriptionStatus = subscriptionTransferError
-        ? `Failed - ${subscriptionTransferError.message}`
+      // why: cast to `Error | null` so TypeScript does not narrow the stub
+      // `null` literal to `never` when accessing `.message` / `.stack`
+      const transferErr = subscriptionTransferError as Error | null;
+      const subscriptionStatus = transferErr
+        ? `Failed - ${transferErr.message}`
         : subscriptionTransferred
         ? "Yes"
         : "No (not requested)";
 
       sendEmail({
-        subject: subscriptionTransferError
+        subject: transferErr
           ? `⚠️ Workspace transferred with errors: ${currentOrganization.name}`
           : `Workspace transferred: ${currentOrganization.name}`,
         to: ADMIN_EMAIL,
@@ -1001,10 +905,8 @@ New Owner: ${resolveUserDisplayName(newOwnerUserOrg.user)} (${
 
 Subscription transferred: ${subscriptionStatus}
 ${
-  subscriptionTransferError
-    ? `\nError details: ${
-        subscriptionTransferError.stack || subscriptionTransferError.message
-      }`
+  transferErr
+    ? `\nError details: ${transferErr.stack || transferErr.message}`
     : ""
 }`,
       });
@@ -1013,7 +915,8 @@ ${
     return {
       newOwner: newOwnerUserOrg.user,
       subscriptionTransferred,
-      subscriptionTransferError: subscriptionTransferError?.message,
+      subscriptionTransferError: (subscriptionTransferError as Error | null)
+        ?.message,
     };
   } catch (cause) {
     throw new ShelfError({
@@ -1056,50 +959,4 @@ export async function resetPersonalWorkspaceBranding(userId: User["id"]) {
   }
 }
 
-/**
- * Checks if a Stripe subscription is a tier subscription
- * by looking at its line-item product metadata.
- */
-function isTierSubscription(sub: Stripe.Subscription): boolean {
-  return sub.items.data.some((item) => {
-    const product = item.price?.product;
-    if (typeof product === "object" && product && "metadata" in product) {
-      return !!(product as Stripe.Product).metadata?.shelf_tier;
-    }
-    return false;
-  });
-}
-
-/**
- * Checks if a Stripe subscription is an addon linked to a specific workspace.
- */
-function isAddonForOrganization(
-  sub: Stripe.Subscription,
-  organizationId: string
-): boolean {
-  const subOrgId = sub.metadata?.organizationId;
-  if (subOrgId !== organizationId) return false;
-
-  return sub.items.data.some((item) => {
-    const product = item.price?.product;
-    if (typeof product === "object" && product && "metadata" in product) {
-      return (product as Stripe.Product).metadata?.product_type === "addon";
-    }
-    return false;
-  });
-}
-
-/**
- * Filters subscriptions to those relevant to a workspace transfer:
- * - Tier subscriptions (always relevant)
- * - Addon subscriptions linked to the specific workspace
- */
-function filterRelevantSubscriptions(
-  subscriptions: Stripe.Subscription[],
-  organizationId: string
-): Stripe.Subscription[] {
-  return subscriptions.filter(
-    (sub) =>
-      isTierSubscription(sub) || isAddonForOrganization(sub, organizationId)
-  );
-}
+// Stripe subscription helpers removed — Stripe is not available in this SQLite build.

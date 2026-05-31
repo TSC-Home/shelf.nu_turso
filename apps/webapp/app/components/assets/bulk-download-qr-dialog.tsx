@@ -11,7 +11,7 @@ import type { BulkQrDownloadLoaderData } from "~/routes/api+/assets.get-assets-f
 import { generateHtmlFromComponent } from "~/utils/component-to-html";
 import { isSelectingAllItems } from "~/utils/list";
 import { sanitizeFilename } from "~/utils/misc";
-import { QrLabel } from "../code-preview/code-preview";
+import { HorizontalQrLabel, QrLabel } from "../code-preview/code-preview";
 import { Dialog, DialogPortal } from "../layout/dialog";
 import { Button } from "../shared/button";
 import { Spinner } from "../shared/spinner";
@@ -79,7 +79,15 @@ export default function BulkDownloadQrDialog({
     if (!apiResponse) return;
 
     try {
-      const { assets, qrIdDisplayPreference, showShelfBranding } = apiResponse;
+      const {
+        assets,
+        qrIdDisplayPreference,
+        labelBrandingText,
+        labelCustomText,
+        labelTemplate,
+      } = apiResponse;
+
+      const isHorizontal = labelTemplate === "HORIZONTAL_50X30";
 
       const zip = new JSZip();
       const qrFolder = zip.folder("qr-codes");
@@ -87,18 +95,29 @@ export default function BulkDownloadQrDialog({
       /* Converting our React component to html so that we can later convert it into an image */
       const qrNodes = assets.map((asset) =>
         generateHtmlFromComponent(
-          <QrLabel
-            data={{ qr: asset.qr }}
-            title={asset.title}
-            qrIdDisplayPreference={qrIdDisplayPreference}
-            sequentialId={asset.sequentialId}
-            showShelfBranding={showShelfBranding}
-          />
+          isHorizontal ? (
+            <HorizontalQrLabel
+              data={{ qr: asset.qr }}
+              title={asset.title}
+              qrIdDisplayPreference={qrIdDisplayPreference}
+              sequentialId={asset.sequentialId}
+              labelBrandingText={labelBrandingText}
+              labelCustomText={labelCustomText}
+            />
+          ) : (
+            <QrLabel
+              data={{ qr: asset.qr }}
+              title={asset.title}
+              qrIdDisplayPreference={qrIdDisplayPreference}
+              sequentialId={asset.sequentialId}
+              labelBrandingText={labelBrandingText}
+            />
+          )
         )
       );
 
       const toBlobOptions = {
-        width: 300,
+        width: isHorizontal ? 500 : 300,
         height: 300,
         backgroundColor: "white",
         style: {

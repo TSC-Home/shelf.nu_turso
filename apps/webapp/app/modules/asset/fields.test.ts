@@ -57,14 +57,17 @@ describe("getAssetOverviewFields", () => {
     const assetId = "my-unique-asset-id";
     const result = getAssetOverviewFields(assetId, false);
 
+    // SQLite: assetIds is a JSON string — filter uses `contains` not `has`
     const bookings = result.bookings as {
       where: {
         NOT: {
-          partialCheckins: { some: { assetIds: { has: string } } };
+          partialCheckins: { some: { assetIds: { contains: string } } };
         };
       };
     };
 
-    expect(bookings.where.NOT.partialCheckins.some.assetIds.has).toBe(assetId);
+    expect(bookings.where.NOT.partialCheckins.some.assetIds.contains).toBe(
+      `"${assetId}"`
+    );
   });
 });

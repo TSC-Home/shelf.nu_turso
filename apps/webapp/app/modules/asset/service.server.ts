@@ -31,7 +31,6 @@ import type {
   SortingOptions,
 } from "~/components/list/filters/sort-by";
 import { db } from "~/database/db.server";
-import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import {
   updateBarcodes,
   validateBarcodeUniqueness,
@@ -109,8 +108,12 @@ import {
 } from "~/utils/org-validation.server";
 import {
   createSignedUrl,
+  deleteStorageFile,
+  listStorageFiles,
   parseFileFormData,
+  readStorageFile,
   uploadImageFromUrl,
+  writeStorageFile,
 } from "~/utils/storage.server";
 import { resolveTeamMemberName, resolveUserDisplayName } from "~/utils/user";
 import { resolveAssetIdsForBulkOperation } from "./bulk-operations-helper.server";
@@ -593,15 +596,15 @@ export async function getAssets(params: {
       // non-ID-shaped terms.
       if (searchTerms.length > 0 && searchTerms.every(looksLikeAssetId)) {
         where.OR = searchTerms.flatMap((term) => [
-          { sequentialId: { contains: term, mode: "insensitive" } },
+          { sequentialId: { contains: term } },
           {
             barcodes: {
-              some: { value: { contains: term, mode: "insensitive" } },
+              some: { value: { contains: term } },
             },
           },
           {
             qrCodes: {
-              some: { id: { contains: term, mode: "insensitive" } },
+              some: { id: { contains: term } },
             },
           },
         ]);
@@ -609,32 +612,32 @@ export async function getAssets(params: {
         where.OR = searchTerms.map((term) => ({
           OR: [
             // Search in asset fields
-            { title: { contains: term, mode: "insensitive" } },
+            { title: { contains: term } },
             // Search in asset sequential id
-            { sequentialId: { contains: term, mode: "insensitive" } },
+            { sequentialId: { contains: term } },
             // Search in asset description
-            { description: { contains: term, mode: "insensitive" } },
+            { description: { contains: term } },
             // Search in related category
-            { category: { name: { contains: term, mode: "insensitive" } } },
+            { category: { name: { contains: term } } },
             // Search in related location
-            { location: { name: { contains: term, mode: "insensitive" } } },
+            { location: { name: { contains: term } } },
             // Search in related tags
             {
-              tags: { some: { name: { contains: term, mode: "insensitive" } } },
+              tags: { some: { name: { contains: term } } },
             },
             // Search in custodian names
             {
               custody: {
                 custodian: {
                   OR: [
-                    { name: { contains: term, mode: "insensitive" } },
+                    { name: { contains: term } },
                     {
                       user: {
                         OR: [
                           {
-                            firstName: { contains: term, mode: "insensitive" },
+                            firstName: { contains: term },
                           },
-                          { lastName: { contains: term, mode: "insensitive" } },
+                          { lastName: { contains: term } },
                         ],
                       },
                     },
@@ -645,13 +648,13 @@ export async function getAssets(params: {
             // Search qr code id
             {
               qrCodes: {
-                some: { id: { contains: term, mode: "insensitive" } },
+                some: { id: { contains: term } },
               },
             },
             // Search barcode values
             {
               barcodes: {
-                some: { value: { contains: term, mode: "insensitive" } },
+                some: { value: { contains: term } },
               },
             },
             // Search in custom fields
@@ -662,7 +665,6 @@ export async function getAssets(params: {
                     value: {
                       path: [jsonPath],
                       string_contains: term,
-                      mode: "insensitive",
                     },
                   })),
                 },
@@ -2048,35 +2050,20 @@ export async function deleteOtherImages({
       ? currentImage.replace(/(\.[^.]+)$/, "-thumbnail$1")
       : `${currentImage}-thumbnail`;
 
-    const { data: deletedImagesData, error: deletedImagesError } =
-      await getSupabaseAdmin()
-        .storage.from("assets")
-        .list(`${userId}/${assetId}`);
+    const allImages = await listStorageFiles("assets", `${userId}/${assetId}`);
 
-    if (deletedImagesError) {
-      throw new ShelfError({
-        cause: deletedImagesError,
-        message: "Failed to fetch images",
-        additionalData: { userId, assetId, currentImage, data },
-        label,
-      });
-    }
-
-    // Extract the image names and filter out the ones to keep
-    const imagesToDelete = (
-      deletedImagesData?.map((image) => image.name) || []
-    ).filter(
-      (image) =>
-        // Keep the current main image and its thumbnail
-        image !== currentImage && image !== currentThumbnail
+    // Keep the current main image and its thumbnail; delete everything else
+    const imagesToDelete = allImages.filter(
+      (image) => image !== currentImage && image !== currentThumbnail
     );
 
-    // Delete the images
     await Promise.all(
       imagesToDelete.map((image) =>
-        getSupabaseAdmin()
-          .storage.from("assets")
-          .remove([`${userId}/${assetId}/${image}`])
+        deleteStorageFile("assets", `${userId}/${assetId}/${image}`).catch(
+          () => {
+            /* non-critical — swallow individual delete failures */
+          }
+        )
       )
     );
   } catch (cause) {
@@ -2113,20 +2100,7 @@ export async function uploadDuplicateAssetMainImage(
       });
     }
 
-    const { data: originalFile, error: downloadError } =
-      await getSupabaseAdmin().storage.from("assets").download(originalPath);
-
-    if (downloadError) {
-      throw new ShelfError({
-        cause: downloadError,
-        message: "Failed to download asset image for duplication",
-        additionalData: { originalPath, assetId, userId },
-        label,
-      });
-    }
-
-    const arrayBuffer = await originalFile.arrayBuffer();
-    const imageBuffer = Buffer.from(arrayBuffer);
+    const imageBuffer = await readStorageFile("assets", originalPath);
     const detectedFormat = detectImageFormat(imageBuffer);
 
     if (!detectedFormat) {
@@ -2139,21 +2113,13 @@ export async function uploadDuplicateAssetMainImage(
       });
     }
 
-    /** Uploading the Blob to supabase */
-    const { data, error } = await getSupabaseAdmin()
-      .storage.from("assets")
-      .upload(
-        `${userId}/${assetId}/main-image-${dateTimeInUnix(Date.now())}`,
-        imageBuffer,
-        { contentType: detectedFormat, upsert: true }
-      );
+    const newFilename = `${userId}/${assetId}/main-image-${dateTimeInUnix(
+      Date.now()
+    )}`;
+    await writeStorageFile("assets", newFilename, imageBuffer, detectedFormat);
 
-    if (error) {
-      throw error;
-    }
-    await deleteOtherImages({ userId, assetId, data });
-    /** Getting the signed url from supabase to we can view image  */
-    return await createSignedUrl({ filename: data.path });
+    await deleteOtherImages({ userId, assetId, data: { path: newFilename } });
+    return await createSignedUrl({ filename: newFilename });
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -2352,8 +2318,8 @@ export async function getAllEntriesForCreateAndEdit({
         where: {
           organizationId,
           OR: [
-            { useFor: { isEmpty: true } },
-            ...(tagUseFor ? [{ useFor: { has: tagUseFor } }] : []),
+            { useFor: { equals: "[]" } },
+            ...(tagUseFor ? [{ useFor: { contains: `"${tagUseFor}"` } }] : []),
           ],
         },
         orderBy: { name: "asc" },
@@ -3214,8 +3180,9 @@ export async function createAssetsFromBackupImport({
             (res, { value, customField }) => {
               // eslint-disable-next-line @typescript-eslint/no-unused-vars
               const { id, createdAt, updatedAt, ...rest } = customField;
+              // SQLite stores options as a JSON string; serialize the array
               const options = value?.valueOption?.length
-                ? [value?.valueOption]
+                ? JSON.stringify([value?.valueOption])
                 : undefined;
               res.push({ ...rest, options, userId, organizationId });
               return res;
@@ -4880,8 +4847,8 @@ export async function getEntitiesWithSelectedValues({
         organizationId,
         id: { notIn: selectedTagIds },
         OR: [
-          { useFor: { isEmpty: true } },
-          { useFor: { has: TagUseFor.ASSET } },
+          { useFor: { equals: "[]" } },
+          { useFor: { contains: `"${TagUseFor.ASSET}"` } },
         ],
       },
       take: allSelectedEntries.includes("tag") ? undefined : 12,
@@ -4893,8 +4860,8 @@ export async function getEntitiesWithSelectedValues({
             organizationId,
             id: { in: selectedTagIds },
             OR: [
-              { useFor: { isEmpty: true } },
-              { useFor: { has: TagUseFor.ASSET } },
+              { useFor: { equals: "[]" } },
+              { useFor: { contains: `"${TagUseFor.ASSET}"` } },
             ],
           },
           orderBy: { name: "asc" },
@@ -4904,8 +4871,8 @@ export async function getEntitiesWithSelectedValues({
       where: {
         organizationId,
         OR: [
-          { useFor: { isEmpty: true } },
-          { useFor: { has: TagUseFor.ASSET } },
+          { useFor: { equals: "[]" } },
+          { useFor: { contains: `"${TagUseFor.ASSET}"` } },
         ],
       },
     }),

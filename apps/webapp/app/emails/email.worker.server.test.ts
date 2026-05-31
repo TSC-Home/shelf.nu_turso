@@ -2,9 +2,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { triggerEmail } from "./email.worker.server";
 
-// why: avoid actual SMTP calls during tests
+// why: vi.mock is hoisted so the factory must not reference block-scoped vars;
+// vi.hoisted() runs at hoist time and returns a stable reference.
+const mockSend = vi.hoisted(() => vi.fn().mockResolvedValue({}));
 vi.mock("~/emails/transporter.server", () => ({
-  transporter: { sendMail: vi.fn().mockResolvedValue({}) },
+  relayClient: { send: mockSend },
 }));
 
 // why: env vars are not available in test environment
@@ -19,8 +21,6 @@ vi.mock("~/utils/scheduler.server", () => ({
   scheduler: { work: vi.fn() },
 }));
 
-const { transporter } = await import("~/emails/transporter.server");
-
 const basePayload = {
   subject: "Test Subject",
   text: "Test body",
@@ -34,17 +34,18 @@ describe("triggerEmail", () => {
       to: "deleted+abc123@deleted.shelf.nu",
     });
 
-    expect(transporter.sendMail).not.toHaveBeenCalled();
+    expect(mockSend).not.toHaveBeenCalled();
   });
 
   it("sends email to normal addresses", async () => {
+    mockSend.mockClear();
     await triggerEmail({
       ...basePayload,
       to: "user@example.com",
     });
 
-    expect(transporter.sendMail).toHaveBeenCalledOnce();
-    expect(transporter.sendMail).toHaveBeenCalledWith(
+    expect(mockSend).toHaveBeenCalledOnce();
+    expect(mockSend).toHaveBeenCalledWith(
       expect.objectContaining({ to: "user@example.com" })
     );
   });

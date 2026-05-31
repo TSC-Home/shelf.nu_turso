@@ -63,6 +63,7 @@ import {
 import { isLikeShelfError, makeShelfError, ShelfError } from "~/utils/error";
 import { isRouteError } from "~/utils/http";
 import { payload, error } from "~/utils/http.server";
+import { parseRoles } from "~/utils/roles";
 import type { CustomerWithSubscriptions } from "~/utils/stripe.server";
 
 import {
@@ -101,12 +102,9 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           displayName: true,
           profilePicture: true,
           onboarded: true,
-          customerId: true,
-          skipSubscriptionCheck: true,
+          // customerId, tierId, skipSubscriptionCheck, hasUnpaidInvoice,
+          // warnForNoPaymentMethod removed — not in SQLite schema
           sso: true,
-          tierId: true,
-          hasUnpaidInvoice: true,
-          warnForNoPaymentMethod: true,
           roles: { select: { id: true, name: true } },
           userOrganizations: {
             where: {
@@ -126,15 +124,11 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         .then((c) => (c ?? {}) as { hidden?: boolean }),
     ]);
 
-    let subscription = null;
-
-    if (user.customerId && stripe) {
-      const customer = (await getStripeCustomer(
-        user.customerId
-      )) as CustomerWithSubscriptions;
-      subscription = getCustomerActiveSubscription({ customer });
-      await validateSubscriptionIsActive({ user, subscription });
-    }
+    // Stripe is not available in this SQLite build — subscription check is a no-op
+    const subscription = null;
+    void getStripeCustomer;
+    void getCustomerActiveSubscription;
+    void validateSubscriptionIsActive;
 
     if (!user.onboarded) {
       return redirect("onboarding");
@@ -161,9 +155,12 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     const isAdmin = user?.roles.some((role) => role.name === Roles["ADMIN"]);
 
     // Get current user's organization role for updates filtering
-    const currentOrganizationUserRoles = user?.userOrganizations.find(
-      (userOrg) => userOrg.organization.id === organizationId
-    )?.roles;
+    // parseRoles handles SQLite JSON string storage ("["ADMIN"]" → ["ADMIN"])
+    const currentOrganizationUserRoles = parseRoles(
+      user?.userOrganizations.find(
+        (userOrg) => userOrg.organization.id === organizationId
+      )?.roles ?? "[]"
+    );
 
     // Check if current user has OWNER or ADMIN role in the organization
     const isOwner = currentOrganizationUserRoles?.includes("OWNER");
@@ -217,8 +214,9 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         canUseBookings: canUseBookings(currentOrganization),
         canUseAudits: canUseAudits(currentOrganization),
         unreadUpdatesCount,
-        hasUnpaidInvoice: user.hasUnpaidInvoice,
-        warnForNoPaymentMethod: user.warnForNoPaymentMethod,
+        // SQLite fork: hasUnpaidInvoice and warnForNoPaymentMethod not in schema
+        hasUnpaidInvoice: false,
+        warnForNoPaymentMethod: false,
         needsSequentialIdMigration,
         /** THis is used to disable team organizations when the currentOrg is Team and no subscription is present  */
         disabledTeamOrg: isAdmin

@@ -34,7 +34,8 @@ export async function createCustomField({
   organizationId,
   active,
   userId,
-  options = [],
+  // SQLite: options is stored as a JSON string; default to serialized empty array
+  options = "[]",
   categories = [],
 }: CustomFieldDraftPayload) {
   try {
@@ -123,7 +124,6 @@ export async function getFilteredAndPaginatedCustomFields(params: {
     if (search) {
       where.name = {
         contains: search,
-        mode: "insensitive",
       };
     }
 
@@ -145,9 +145,11 @@ export async function getFilteredAndPaginatedCustomFields(params: {
        * Uses COUNT(DISTINCT "assetId") to ensure each asset is counted only once per custom field,
        * preventing inflated counts if duplicate AssetCustomFieldValue records exist
        */
+      // Removed `::int` cast — PostgreSQL-specific; SQLite/libSQL returns
+      // COUNT as integer natively.  Caller uses Number() anyway.
       db.$queryRaw<Array<{ customFieldId: string; count: bigint }>>`SELECT
           acfv."customFieldId",
-          COUNT(DISTINCT acfv."assetId")::int as count
+          COUNT(DISTINCT acfv."assetId") as count
         FROM "AssetCustomFieldValue" acfv
         INNER JOIN "CustomField" cf ON acfv."customFieldId" = cf.id
         WHERE cf."organizationId" = ${organizationId}
@@ -432,7 +434,6 @@ export async function upsertCustomField(
         where: {
           name: {
             equals: def.name,
-            mode: "insensitive",
           },
           organizationId: def.organizationId,
           deletedAt: null,
@@ -460,17 +461,28 @@ export async function upsertCustomField(
           });
         }
         if (existingCustomField.type === "OPTION") {
-          const newOptions = def.options?.filter(
-            (op) => !existingCustomField?.options?.includes(op)
+          // SQLite stores options as JSON strings — parse before array operations
+          const defOptionsArr: string[] = def.options
+            ? typeof def.options === "string"
+              ? (JSON.parse(def.options) as string[])
+              : (def.options as unknown as string[])
+            : [];
+          const existingOptionsArr: string[] = existingCustomField?.options
+            ? typeof existingCustomField.options === "string"
+              ? (JSON.parse(existingCustomField.options) as string[])
+              : (existingCustomField.options as unknown as string[])
+            : [];
+          const newOptions = defOptionsArr.filter(
+            (op) => !existingOptionsArr.includes(op)
           );
           if (newOptions?.length) {
             //create non existing options
-            const options = (existingCustomField?.options || []).concat(
+            const mergedOptions = existingOptionsArr.concat(
               Array.from(new Set(newOptions))
             );
             const updatedCustomField = await updateCustomField({
               id: existingCustomField.id,
-              options,
+              options: JSON.stringify(mergedOptions),
               organizationId: def.organizationId,
             });
             existingCustomField = updatedCustomField;
@@ -535,7 +547,8 @@ export async function createCustomFieldsIfNotExists({
     for (const [customFieldDefStr, def] of Object.entries(fieldToDefDraftMap)) {
       if (def.type === "OPTION" && optionMap[customFieldDefStr]?.length) {
         const uniqueSet = new Set(optionMap[customFieldDefStr]);
-        def.options = Array.from(uniqueSet);
+        // SQLite: options is stored as a JSON string
+        def.options = JSON.stringify(Array.from(uniqueSet));
       }
     }
     return await upsertCustomField(Object.values(fieldToDefDraftMap));

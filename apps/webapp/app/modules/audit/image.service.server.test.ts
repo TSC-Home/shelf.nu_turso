@@ -8,6 +8,8 @@ vi.mock("~/utils/storage.server", () => ({
     (params) =>
       `${params.organizationId}/${params.type}/${params.typeId}/test.jpg`
   ),
+  // why: uploadAuditImage calls getPublicFileURL to build image URLs after upload
+  getPublicFileURL: vi.fn((params) => `https://example.com/${params.filename}`),
 }));
 
 vi.mock("~/database/db.server", () => ({

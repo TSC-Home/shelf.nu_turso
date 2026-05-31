@@ -293,10 +293,7 @@ export async function exportAssetsFromIndexToCsv({
   request: Request;
   assetIds: string;
   settings: AssetIndexSettings;
-  currentOrganization: Pick<
-    Organization,
-    "id" | "barcodesEnabled" | "currency"
-  >;
+  currentOrganization: Pick<Organization, "id" | "currency">;
   assetIndexCurrentSearchParams: string | null;
 }) {
   /** Make an array of the ids and check if we have to take all */
@@ -325,7 +322,7 @@ export async function exportAssetsFromIndexToCsv({
     settings,
     takeAll,
     assetIds: takeAll ? undefined : ids,
-    canUseBarcodes: currentOrganization.barcodesEnabled ?? false,
+    canUseBarcodes: true, // field removed in self-hosted fork; always enabled
   });
   const csvData = buildCsvExportDataFromAssets({
     assets,
@@ -356,10 +353,7 @@ export const buildCsvExportDataFromAssets = ({
 }: {
   assets: AdvancedIndexAsset[];
   columns: Column[];
-  currentOrganization: Pick<
-    Organization,
-    "id" | "barcodesEnabled" | "currency"
-  >;
+  currentOrganization: Pick<Organization, "id" | "currency">;
   request: Request;
 }): string[][] => {
   if (!assets.length) return [];
@@ -563,7 +557,7 @@ export const formatValueForCsv = (value: any, isMarkdown = false): string => {
 const formatCustomFieldForCsv = (
   fieldValue: ShelfAssetCustomFieldValueType["value"],
   cfType: CustomFieldType | undefined,
-  currentOrganization: Pick<Organization, "id" | "barcodesEnabled" | "currency">
+  currentOrganization: Pick<Organization, "id" | "currency">
 ): string => {
   if (!fieldValue || fieldValue.raw === undefined || fieldValue.raw === null) {
     return "";

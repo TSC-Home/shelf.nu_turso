@@ -1,5 +1,5 @@
 import type { Prisma, User } from "@prisma/client";
-import type PgBoss from "pg-boss";
+// pg-boss removed; worker uses custom scheduler
 import { db } from "~/database/db.server";
 import { sendEmail } from "~/emails/mail.server";
 import { ShelfError } from "~/utils/error";
@@ -42,7 +42,7 @@ type UserToEmail = Pick<
 
 const ASSET_SCHEDULER_EVENT_HANDLERS: Record<
   AssetsEventType,
-  (job: PgBoss.Job<AssetsSchedulerData>) => Promise<void>
+  (job: { data: AssetsSchedulerData; id: string }) => Promise<void>
 > = {
   REMINDER: async (job) => {
     const reminder = await db.assetReminder.findFirst({
@@ -83,7 +83,7 @@ const ASSET_SCHEDULER_EVENT_HANDLERS: Record<
           userOrganizations: {
             some: {
               organizationId: reminder.organizationId,
-              roles: { has: "OWNER" },
+              roles: { contains: '"OWNER"' },
             },
           },
         },

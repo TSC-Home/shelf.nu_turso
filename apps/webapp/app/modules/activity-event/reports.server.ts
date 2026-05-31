@@ -96,12 +96,12 @@ export async function bookingStatusTransitionCounts({
   to,
 }: ReportScope): Promise<Array<{ toStatus: string; count: number }>> {
   try {
-    // `#>> '{}'` extracts the JSON scalar as text — works for any top-level
-    // JSON primitive. Indexed on (organizationId, action, occurredAt).
+    // json_extract("toValue", '$') strips the outer JSON quotes from stored
+    // string values (e.g. `"ONGOING"` → `ONGOING`). Works in SQLite/libSQL.
     const rows = await db.$queryRaw<
       Array<{ to_status: string; count: bigint }>
     >`
-      SELECT "toValue" #>> '{}' AS to_status, COUNT(*) AS count
+      SELECT json_extract("toValue", '$') AS to_status, COUNT(*) AS count
       FROM "ActivityEvent"
       WHERE "organizationId" = ${organizationId}
         AND action = 'BOOKING_STATUS_CHANGED'

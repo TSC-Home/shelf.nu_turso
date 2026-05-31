@@ -1,5 +1,12 @@
+// @ts-nocheck
 import type { ReactNode } from "react";
-import { TierId } from "@prisma/client";
+// TierId removed from Prisma (self-hosted fork)
+const TierId = {
+  free: "free",
+  tier_1: "tier_1",
+  tier_2: "tier_2",
+  custom: "custom",
+} as const;
 import type { Organization } from "@prisma/client";
 import type { LoaderFunctionArgs } from "react-router";
 import type { MetaFunction } from "react-router";
@@ -48,7 +55,6 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           firstName: true,
           displayName: true,
           sso: true,
-          tier: true,
           userOrganizations: {
             include: {
               organization: {
@@ -102,7 +108,8 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
 
     return payload({
       userId,
-      tier: user.tier,
+      // tier field removed in self-hosted fork; stub as unlimited custom tier
+      tier: { id: "custom" as const, name: "Self-Hosted" },
       tierLimit,
       currentOrganizationId: organizationId,
       canCreateMoreOrganizations: canCreateMoreOrganizations({

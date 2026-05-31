@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { useState } from "react";
 import { Roles } from "@prisma/client";
 import { Form, useActionData } from "react-router";

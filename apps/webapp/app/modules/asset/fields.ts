@@ -85,10 +85,11 @@ export const getAssetOverviewFields = (
       where: {
         status: { in: ["ONGOING", "OVERDUE"] },
         // Exclude bookings where this asset has been partially checked in
+        // SQLite: assetIds is stored as a JSON string, use contains for membership check
         NOT: {
           partialCheckins: {
             some: {
-              assetIds: { has: assetId },
+              assetIds: { contains: `"${assetId}"` },
             },
           },
         },

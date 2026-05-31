@@ -1,6 +1,6 @@
 /** In this file you can find the different ways of fetching data for the asset index. They are either for the simple or advanced mode */
 
-import type { AssetIndexSettings, Kit } from "@prisma/client";
+import type { AssetIndexSettings, CustomField, Kit } from "@prisma/client";
 import { OrganizationRoles } from "@prisma/client";
 import { data, redirect } from "react-router";
 import type { HeaderData } from "~/components/layout/header/types";
@@ -308,10 +308,10 @@ export async function simpleModeLoader({
       currentOrganization,
       settings,
       /**
-       * We return an empty array in simple mode for easier to manage types
-       * Those are fields we need in advanced mode and this helps us prevent type issues.
-       * */
-      customFields: [],
+       * Custom fields are only needed in advanced mode; simple mode returns
+       * an empty typed array to keep the shared loader-data shape consistent.
+       */
+      customFields: [] as CustomField[],
       kits: [] as Kit[],
       totalKits: 0,
       bookings: [] as { id: string; name: string }[],
@@ -424,7 +424,7 @@ export async function advancedModeLoader({
       filters,
       settings,
       getBookings: view === "availability",
-      canUseBarcodes: currentOrganization.barcodesEnabled ?? false,
+      canUseBarcodes: true, // field removed in self-hosted fork; always enabled
       availableToBookOnly: role === OrganizationRoles.SELF_SERVICE,
       preParsedFilters: parsedFilters,
     }),

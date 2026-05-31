@@ -470,7 +470,6 @@ export function getAssetsWhereInput({
   if (search) {
     where.title = {
       contains: search.toLowerCase().trim(),
-      mode: "insensitive",
     };
   }
 

@@ -11,6 +11,7 @@ import { updateCookieWithPerPage } from "~/utils/cookies.server";
 import { ShelfError } from "~/utils/error";
 import { getCurrentSearchParams } from "~/utils/http.server";
 import { getParamsValues } from "~/utils/list";
+import { parseRoles } from "~/utils/roles";
 
 const label = "Settings";
 
@@ -55,10 +56,10 @@ export async function getPaginatedAndFilterableSettingUsers({
       /** Either search the input against organization's user */
       userOrganizationWhere.user = {
         OR: [
-          { firstName: { contains: search, mode: "insensitive" } },
-          { lastName: { contains: search, mode: "insensitive" } },
-          { displayName: { contains: search, mode: "insensitive" } },
-          { email: { contains: search, mode: "insensitive" } },
+          { firstName: { contains: search } },
+          { lastName: { contains: search } },
+          { displayName: { contains: search } },
+          { email: { contains: search } },
         ],
       };
     }
@@ -108,8 +109,9 @@ export async function getPaginatedAndFilterableSettingUsers({
         img: um.user.profilePicture ?? "/static/images/default_pfp.jpg",
         email: um.user.email,
         status: "ACCEPTED",
-        role: organizationRolesMap[um.roles[0]],
-        roleEnum: um.roles[0],
+        // SQLite: roles is a JSON string — parse before indexing
+        role: organizationRolesMap[parseRoles(um.roles)[0]],
+        roleEnum: parseRoles(um.roles)[0],
         userId: um.user.id,
         sso: um.user.sso,
         custodies: um?.user?.teamMembers?.[0]?._count?.custodies || 0,
@@ -169,9 +171,9 @@ export async function getPaginatedAndFilterableSettingTeamMembers({
 
     if (search) {
       where.OR = [
-        { name: { contains: search, mode: "insensitive" } },
-        { user: { firstName: { contains: search, mode: "insensitive" } } },
-        { user: { lastName: { contains: search, mode: "insensitive" } } },
+        { name: { contains: search } },
+        { user: { firstName: { contains: search } } },
+        { user: { lastName: { contains: search } } },
       ];
     }
 

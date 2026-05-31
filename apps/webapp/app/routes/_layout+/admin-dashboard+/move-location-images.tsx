@@ -8,7 +8,6 @@ import Input from "~/components/forms/input";
 import { Button } from "~/components/shared/button";
 import { db } from "~/database/db.server";
 import { useDisabled } from "~/hooks/use-disabled";
-import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { PUBLIC_BUCKET } from "~/utils/constants";
 import { cropImage } from "~/utils/crop-image";
@@ -17,6 +16,7 @@ import { makeShelfError } from "~/utils/error";
 import { payload, error, parseData } from "~/utils/http.server";
 import { id } from "~/utils/id/id.server";
 import { requireAdmin } from "~/utils/roles.server";
+import { getPublicFileURL, writeStorageFile } from "~/utils/storage.server";
 
 export const MigrationFormSchema = z.object({
   count: z.coerce.number().min(1).max(150, "Maximum 150 locations at a time"),
@@ -344,8 +344,6 @@ export async function action({ context, request }: ActionFunctionArgs) {
       });
     }
 
-    const supabase = getSupabaseAdmin();
-
     const movedLocationIds: string[] = [];
     const fixedLocationIds: string[] = [];
     const skippedLocationIds: string[] = [];
@@ -418,27 +416,29 @@ export async function action({ context, request }: ActionFunctionArgs) {
           } bytes${wasFixed ? " (fixed)" : ""}`
         );
 
-        const { data, error } = await supabase.storage
-          .from(PUBLIC_BUCKET)
-          .upload(imagePath, processedBlob, {
-            upsert: true,
-            contentType: processedContentType,
-          });
-
-        if (error) {
+        try {
+          await writeStorageFile(
+            PUBLIC_BUCKET,
+            imagePath,
+            Buffer.from(processedBlob),
+            processedContentType
+          );
+        } catch (uploadErr) {
           console.error(
             `Failed to upload image for location ${location.id}:`,
-            error
+            uploadErr
           );
-          errorLog.push(`Upload failed for ${location.id}: ${error.message}`);
+          errorLog.push(
+            `Upload failed for ${location.id}: ${String(uploadErr)}`
+          );
           skippedLocationIds.push(location.id);
           continue;
         }
 
-        /** Getting the public url */
-        const {
-          data: { publicUrl },
-        } = supabase.storage.from(PUBLIC_BUCKET).getPublicUrl(data.path);
+        const publicUrl = getPublicFileURL({
+          filename: imagePath,
+          bucketName: PUBLIC_BUCKET,
+        });
 
         /** Generating thumbnail */
         const thumbnailFile = await cropImage(
@@ -454,32 +454,31 @@ export async function action({ context, request }: ActionFunctionArgs) {
           }
         );
 
-        const { data: thumbnailData, error: thumbnailError } =
-          await supabase.storage
-            .from(PUBLIC_BUCKET)
-            .upload(thumbnailPath, thumbnailFile, {
-              upsert: true,
-              contentType: processedContentType,
-            });
-
-        if (thumbnailError) {
+        try {
+          await writeStorageFile(
+            PUBLIC_BUCKET,
+            thumbnailPath,
+            Buffer.from(thumbnailFile),
+            processedContentType
+          );
+        } catch (thumbnailErr) {
           console.error(
             `Failed to upload thumbnail for location ${location.id}:`,
-            thumbnailError
+            thumbnailErr
           );
           errorLog.push(
-            `Thumbnail upload failed for ${location.id}: ${thumbnailError.message}`
+            `Thumbnail upload failed for ${location.id}: ${String(
+              thumbnailErr
+            )}`
           );
           skippedLocationIds.push(location.id);
           continue;
         }
 
-        /** Getting the thumbnail public url */
-        const {
-          data: { publicUrl: thumbnailPublicUrl },
-        } = supabase.storage
-          .from(PUBLIC_BUCKET)
-          .getPublicUrl(thumbnailData.path);
+        const thumbnailPublicUrl = getPublicFileURL({
+          filename: thumbnailPath,
+          bucketName: PUBLIC_BUCKET,
+        });
 
         await db.location.update({
           // eslint-disable-next-line local-rules/require-org-scope-on-id-queries -- idor-safe: Shelf super-admin cross-org image-migration tool; gated by requireAdmin(userId) and intentionally operates on locations across all organizations (locationWithImages findMany has no org filter by design)

@@ -1,5 +1,30 @@
+/**
+ * File Storage Abstraction
+ *
+ * Supports two storage drivers selected via the STORAGE_DRIVER environment variable:
+ * - "local" (default): files written to UPLOAD_DIR, served at /uploads/* by the Hono server
+ * - "s3": files stored in an S3-compatible bucket (AWS S3, MinIO, etc.)
+ *
+ * Public interface matches the original Supabase storage implementation so all
+ * call sites work without modification.
+ *
+ * @see {@link file://../../../server/index.ts} - Hono static-file handler for local storage
+ */
+
+import { createHmac } from "node:crypto";
+import fsSync from "node:fs";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { Readable } from "node:stream";
 
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  ListObjectsV2Command,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
+import { getSignedUrl as getS3SignedUrl } from "@aws-sdk/s3-request-presigner";
 import {
   MaxFileSizeExceededError,
   parseFormData,
@@ -7,7 +32,6 @@ import {
 import type { LRUCache } from "lru-cache";
 import type { ResizeOptions } from "sharp";
 
-import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import {
   ASSET_MAX_IMAGE_UPLOAD_SIZE,
   DEFAULT_MAX_IMAGE_UPLOAD_SIZE,
@@ -15,33 +39,168 @@ import {
 } from "./constants";
 import { cropImage } from "./crop-image";
 import { delay } from "./delay";
-import { SUPABASE_URL } from "./env";
+import { getEnv, SERVER_URL, SESSION_SECRET } from "./env";
 import type { AdditionalData, ErrorLabel } from "./error";
 import { isLikeShelfError, ShelfError } from "./error";
-import { extractImageNameFromSupabaseUrl } from "./extract-image-name-from-supabase-url";
 import { id } from "./id/id.server";
 import { detectImageFormat } from "./image-format.server";
-import {
-  cacheOptimizedImage,
-  type CachedImage,
-} from "./import.image-cache.server";
+import type { CachedImage } from "./import.image-cache.server";
 import { Logger } from "./logger";
 
 const label: ErrorLabel = "File storage";
 
+// ---------------------------------------------------------------------------
+// Driver configuration
+// ---------------------------------------------------------------------------
+
+/** Active storage driver. Set STORAGE_DRIVER=s3 to use S3-compatible storage. */
+export const STORAGE_DRIVER =
+  getEnv("STORAGE_DRIVER", { isRequired: false, isSecret: false }) || "local";
+
+/** Root directory for local file storage (only used when STORAGE_DRIVER=local). */
+export const UPLOAD_DIR =
+  getEnv("UPLOAD_DIR", { isRequired: false, isSecret: false }) ||
+  "/data/uploads";
+
+const isLocal = STORAGE_DRIVER !== "s3";
+
+// ---------------------------------------------------------------------------
+// S3 client (lazy — only initialised when STORAGE_DRIVER=s3)
+// ---------------------------------------------------------------------------
+
+let _s3: { client: S3Client; bucket: string; publicUrl: string } | null = null;
+
+/** Returns the lazily-initialised S3 configuration. Throws if env vars are missing. */
+function getS3(): { client: S3Client; bucket: string; publicUrl: string } {
+  if (_s3) return _s3;
+
+  const s3Config = {
+    client: new S3Client({
+      endpoint: getEnv("S3_ENDPOINT", { isRequired: false }) || undefined,
+      region: getEnv("S3_REGION", { isRequired: false }) || "us-east-1",
+      credentials: {
+        accessKeyId: getEnv("S3_ACCESS_KEY_ID") as string,
+        secretAccessKey: getEnv("S3_SECRET_ACCESS_KEY") as string,
+      },
+      forcePathStyle:
+        getEnv("S3_FORCE_PATH_STYLE", { isRequired: false }) === "true",
+    }),
+    bucket: getEnv("S3_BUCKET") as string,
+    publicUrl: (getEnv("S3_PUBLIC_URL", { isRequired: false }) || "").replace(
+      /\/+$/,
+      ""
+    ),
+  };
+  _s3 = s3Config;
+  return s3Config;
+}
+
+// ---------------------------------------------------------------------------
+// Local storage helpers
+// ---------------------------------------------------------------------------
+
+/** Absolute filesystem path for a stored file. */
+function localFilePath(bucketName: string, filename: string): string {
+  return path.join(UPLOAD_DIR, bucketName, filename);
+}
+
+/** Public URL for a local file (served by the Hono /uploads/* handler). */
+function localFileUrl(bucketName: string, filename: string): string {
+  return `${SERVER_URL}/uploads/${bucketName}/${filename}`;
+}
+
+/** Signed TTL (seconds) — 72 h to match the legacy Supabase signed URL TTL. */
+const SIGNED_URL_TTL_SECONDS = 3 * 24 * 60 * 60;
+
+/** Computes the HMAC-SHA256 signature for a local signed URL. */
+function signLocalUrl(
+  bucketName: string,
+  filename: string,
+  exp: number
+): string {
+  return createHmac("sha256", SESSION_SECRET)
+    .update(`${bucketName}/${filename}|${exp}`)
+    .digest("hex");
+}
+
+/**
+ * Validates the ?exp and ?sig query parameters on a local-storage signed URL.
+ * Returns true only when the signature is correct and the URL has not expired.
+ */
+export function verifyLocalSignedUrl(
+  bucketName: string,
+  filename: string,
+  sig: string,
+  exp: string
+): boolean {
+  const expNum = Number(exp);
+  if (!expNum || Date.now() > expNum * 1000) return false;
+
+  const expected = signLocalUrl(bucketName, filename, expNum);
+  const sigBuf = Buffer.from(sig, "hex");
+  const expBuf = Buffer.from(expected, "hex");
+
+  if (sigBuf.length !== expBuf.length) return false;
+
+  // Constant-time comparison to prevent timing attacks
+  let diff = 0;
+  for (let i = 0; i < sigBuf.length; i++) {
+    diff |= sigBuf[i] ^ expBuf[i];
+  }
+
+  return diff === 0;
+}
+
+/** Creates all intermediate directories for the given file path. */
+function ensureDir(filePath: string): void {
+  fsSync.mkdirSync(path.dirname(filePath), { recursive: true });
+}
+
+// ---------------------------------------------------------------------------
+// Path extraction — works for both local and S3 URLs
+// ---------------------------------------------------------------------------
+
+/**
+ * Extracts the relative file path within a bucket from a storage URL.
+ * Handles local (/uploads/{bucket}/{path}) and S3 ({publicUrl}/{bucket}/{path}) URLs.
+ * Query parameters (signed-URL tokens) are stripped before extraction.
+ */
+function extractPathFromUrl(url: string, bucketName: string): string | null {
+  const clean = url.split("?")[0];
+  const marker = `/${bucketName}/`;
+  const idx = clean.indexOf(marker);
+  if (idx === -1) return null;
+  return clean.substring(idx + marker.length);
+}
+
+// ---------------------------------------------------------------------------
+// Core public API
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns a public URL for a file.
+ *
+ * For "local" driver: `{SERVER_URL}/uploads/{bucketName}/{filename}`
+ * For "s3" driver: `{S3_PUBLIC_URL}/{bucketName}/{filename}`
+ *
+ * Use this for buckets that are intended to be publicly accessible
+ * (profile-pictures, files). For private asset images use createSignedUrl().
+ */
 export function getPublicFileURL({
   filename,
   bucketName = "profile-pictures",
 }: {
   filename: string;
   bucketName?: string;
-}) {
+}): string {
   try {
-    const { data } = getSupabaseAdmin()
-      .storage.from(bucketName)
-      .getPublicUrl(filename);
+    if (isLocal) {
+      return localFileUrl(bucketName, filename);
+    }
 
-    return data.publicUrl;
+    const { publicUrl, bucket } = getS3();
+    const baseUrl = publicUrl || `https://${bucket}.s3.amazonaws.com`;
+    return `${baseUrl}/${bucketName}/${filename}`;
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -52,6 +211,12 @@ export function getPublicFileURL({
   }
 }
 
+/**
+ * Creates a time-limited signed URL (72 h TTL) for a private file.
+ *
+ * For "local" driver: appends ?exp={unix_seconds}&sig={hmac} to the file URL.
+ * For "s3" driver: uses the AWS SDK presigned URL mechanism.
+ */
 export async function createSignedUrl({
   filename,
   bucketName = "assets",
@@ -62,198 +227,57 @@ export async function createSignedUrl({
   const normalizedFilename = filename.startsWith("/")
     ? filename.substring(1)
     : filename;
-  const maxAttempts = 3;
 
   try {
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const { data, error } = await getSupabaseAdmin()
-        .storage.from(bucketName)
-        .createSignedUrl(normalizedFilename, 3 * 24 * 60 * 60); // 72h — must match threeDaysFromNow() in refreshExpiredAssetImages
-
-      if (!error) {
-        const signedUrl = data?.signedUrl;
-        if (!signedUrl) {
-          throw new ShelfError({
-            cause: null,
-            message: "Supabase did not return a signed URL",
-            additionalData: { filename: normalizedFilename, bucketName },
-            label,
-          });
-        }
-        return signedUrl;
-      }
-
-      // Supabase occasionally responds with HTML on 50x/edge errors, which the client surfaces
-      // as StorageUnknownError with a JSON parse failure. Retry before surfacing it to keep
-      // transient CDN hiccups from bubbling up as user-facing ShelfErrors.
-      const isHtmlError = isSupabaseHtmlError(error);
-      const isFetchFailed = isSupabaseFetchFailedError(error);
-
-      if (isHtmlError || isFetchFailed) {
-        if (attempt < maxAttempts) {
-          Logger.warn(
-            new ShelfError({
-              cause: error,
-              message: isHtmlError
-                ? "Supabase returned a non-JSON response while creating a signed URL. Retrying."
-                : "Supabase request failed while creating a signed URL. Retrying.",
-              additionalData: {
-                filename: normalizedFilename,
-                bucketName,
-                attempt,
-              },
-              label,
-              shouldBeCaptured: false,
-            })
-          );
-          await delay(1000);
-          continue;
-        }
-
-        // All retry attempts exhausted with HTML errors - this is a transient
-        // infrastructure issue that shouldn't spam Sentry
-        throw new ShelfError({
-          cause: error,
-          message:
-            "Supabase is experiencing temporary issues. Using existing URL.",
-          additionalData: {
-            filename: normalizedFilename,
-            bucketName,
-            attempts: maxAttempts,
-            errorType: isHtmlError
-              ? "persistent_html_error"
-              : "persistent_fetch_failed",
-          },
-          label,
-          shouldBeCaptured: false,
-        });
-      }
-
-      // Supabase returns 429 when the storage API is overwhelmed.
-      // Use exponential backoff to give the API time to recover.
-      if (isSupabaseRateLimitError(error)) {
-        if (attempt < maxAttempts) {
-          const backoffMs = Math.pow(2, attempt - 1) * 1000; // 1s, 2s
-          Logger.warn(
-            new ShelfError({
-              cause: error,
-              message:
-                "Supabase rate limit hit while creating a signed URL. Retrying with backoff.",
-              additionalData: {
-                filename: normalizedFilename,
-                bucketName,
-                attempt,
-                backoffMs,
-              },
-              label,
-              shouldBeCaptured: false,
-            })
-          );
-          await delay(backoffMs);
-          continue;
-        }
-
-        // All retries exhausted - this is a transient rate-limit issue
-        // that shouldn't spam Sentry
-        throw new ShelfError({
-          cause: error,
-          message:
-            "Supabase rate limit exceeded. Please try again in a moment.",
-          additionalData: {
-            filename: normalizedFilename,
-            bucketName,
-            attempts: maxAttempts,
-            errorType: "rate_limit_exceeded",
-          },
-          label,
-          shouldBeCaptured: false,
-        });
-      }
-
-      // Supabase returns 5xx (502, 503, 504) on transient infrastructure issues
-      // like gateway timeouts. Use exponential backoff before surfacing.
-      if (isSupabaseServerError(error)) {
-        if (attempt < maxAttempts) {
-          const backoffMs = Math.pow(2, attempt - 1) * 1000; // 1s, 2s
-          Logger.warn(
-            new ShelfError({
-              cause: error,
-              message:
-                "Supabase server error while creating a signed URL. Retrying with backoff.",
-              additionalData: {
-                filename: normalizedFilename,
-                bucketName,
-                attempt,
-                backoffMs,
-              },
-              label,
-              shouldBeCaptured: false,
-            })
-          );
-          await delay(backoffMs);
-          continue;
-        }
-
-        // All retries exhausted - this is a transient server issue
-        // that shouldn't spam Sentry
-        throw new ShelfError({
-          cause: error,
-          message:
-            "Supabase is experiencing temporary issues. Using existing URL.",
-          additionalData: {
-            filename: normalizedFilename,
-            bucketName,
-            attempts: maxAttempts,
-            errorType: "server_error",
-          },
-          label,
-          shouldBeCaptured: false,
-        });
-      }
-
-      throw error;
+    if (isLocal) {
+      const exp = Math.floor(Date.now() / 1000) + SIGNED_URL_TTL_SECONDS;
+      const sig = signLocalUrl(bucketName, normalizedFilename, exp);
+      return `${localFileUrl(
+        bucketName,
+        normalizedFilename
+      )}?exp=${exp}&sig=${sig}`;
     }
 
-    // The loop should always return or throw, but ensure we never fall through.
-    throw new ShelfError({
-      cause: null,
-      message: "Unable to create signed URL after retries.",
-      additionalData: { filename: normalizedFilename, bucketName },
-      label,
+    const { client, bucket } = getS3();
+    const command = new GetObjectCommand({
+      Bucket: bucket,
+      Key: `${bucketName}/${normalizedFilename}`,
+    });
+
+    return await getS3SignedUrl(client, command, {
+      expiresIn: SIGNED_URL_TTL_SECONDS,
     });
   } catch (cause) {
-    // If it's already a ShelfError, preserve it (including shouldBeCaptured flag)
-    if (isLikeShelfError(cause)) {
-      throw cause;
-    }
+    if (isLikeShelfError(cause)) throw cause;
 
     throw new ShelfError({
       cause,
       message:
         "Something went wrong while creating a signed URL. Please try again. If the issue persists contact support.",
-      additionalData: {
-        filename: normalizedFilename,
-        bucketName,
-        errorName:
-          typeof cause === "object" &&
-          cause !== null &&
-          "name" in cause &&
-          typeof (cause as { name?: unknown }).name === "string"
-            ? (cause as { name: string }).name
-            : undefined,
-        errorMessage:
-          typeof cause === "object" &&
-          cause !== null &&
-          "message" in cause &&
-          typeof (cause as { message?: unknown }).message === "string"
-            ? (cause as { message: string }).message
-            : undefined,
-      },
+      additionalData: { filename: normalizedFilename, bucketName },
       label,
     });
   }
 }
 
+/** Options for file upload operations. */
+export interface UploadOptions {
+  bucketName: string;
+  filename: string;
+  contentType: string;
+  resizeOptions?: ResizeOptions;
+  upsert?: boolean;
+}
+
+/**
+ * Uploads a file to storage after optional image cropping/resizing.
+ *
+ * When generateThumbnail is true, also uploads a square thumbnail and returns
+ * `{ originalPath, thumbnailPath }` instead of a plain string path.
+ *
+ * @returns The stored file path (relative to bucket root), or an object with
+ *   originalPath and thumbnailPath when a thumbnail is generated.
+ */
 export async function uploadFile(
   fileData: AsyncIterable<Uint8Array>,
   {
@@ -262,7 +286,7 @@ export async function uploadFile(
     bucketName,
     resizeOptions,
     generateThumbnail = false,
-    thumbnailSize = 108, // Default thumbnail size
+    thumbnailSize = 108,
     upsert = false,
   }: UploadOptions & {
     generateThumbnail?: boolean;
@@ -271,64 +295,46 @@ export async function uploadFile(
   }
 ): Promise<string | { originalPath: string; thumbnailPath: string }> {
   try {
-    // Process original image
     const file = await cropImage(fileData, resizeOptions);
 
-    // Upload original file
-    const { data, error } = await getSupabaseAdmin()
-      .storage.from(bucketName)
-      .upload(filename, file, { contentType, upsert });
+    const originalPath = await storeBuffer(
+      Buffer.from(file),
+      bucketName,
+      filename,
+      contentType,
+      upsert
+    );
 
-    if (error) {
-      throw error;
+    if (!generateThumbnail) {
+      return originalPath;
     }
 
-    // If thumbnail generation is requested
-    if (generateThumbnail) {
-      // Generate a thumbnail filename
-      let thumbFilename: string;
+    const thumbFilename = filename.includes(".")
+      ? filename.replace(/(\.[^.]+)$/, "-thumbnail$1")
+      : `${filename}-thumbnail`;
 
-      // Check if the file has an extension
-      if (filename.includes(".")) {
-        // File has extension, add '-thumbnail' before the extension
-        thumbFilename = filename.replace(/(\.[^.]+)$/, "-thumbnail$1");
-      } else {
-        // File has no extension, just append '-thumbnail'
-        thumbFilename = `${filename}-thumbnail`;
+    const thumbnailBuffer = await cropImage(
+      (async function* () {
+        await Promise.resolve();
+        yield new Uint8Array(file);
+      })(),
+      {
+        width: thumbnailSize,
+        height: thumbnailSize,
+        fit: "cover",
+        withoutEnlargement: true,
       }
+    );
 
-      // Create thumbnail version with Sharp
-      const thumbnailFile = await cropImage(
-        // Convert Buffer back to AsyncIterable for consistency
-        (async function* () {
-          await Promise.resolve(); // Satisfy eslint requirement
-          yield new Uint8Array(file);
-        })(),
-        {
-          width: thumbnailSize,
-          height: thumbnailSize,
-          fit: "cover",
-          withoutEnlargement: true,
-        }
-      );
+    const thumbnailPath = await storeBuffer(
+      Buffer.from(thumbnailBuffer),
+      bucketName,
+      thumbFilename,
+      contentType,
+      true
+    );
 
-      // Upload thumbnail
-      const { data: thumbData, error: thumbError } = await getSupabaseAdmin()
-        .storage.from(bucketName)
-        .upload(thumbFilename, thumbnailFile, { contentType, upsert: true });
-
-      if (thumbError) {
-        throw thumbError;
-      }
-
-      return {
-        originalPath: data.path,
-        thumbnailPath: thumbData.path,
-      };
-    }
-
-    // Return just the path string for backward compatibility
-    return data.path;
+    return { originalPath, thumbnailPath };
   } catch (cause) {
     const isShelfError = isLikeShelfError(cause);
 
@@ -344,14 +350,57 @@ export async function uploadFile(
   }
 }
 
-export interface UploadOptions {
-  bucketName: string;
-  filename: string;
-  contentType: string;
-  resizeOptions?: ResizeOptions;
-  upsert?: boolean;
+/**
+ * Writes a buffer to storage and returns the stored filename (relative path within bucket).
+ * Used internally by uploadFile and uploadImageFromUrl.
+ */
+async function storeBuffer(
+  buffer: Buffer,
+  bucketName: string,
+  filename: string,
+  contentType: string,
+  upsert = false
+): Promise<string> {
+  if (isLocal) {
+    const filePath = localFilePath(bucketName, filename);
+    ensureDir(filePath);
+
+    if (!upsert) {
+      try {
+        await fs.access(filePath);
+        throw new ShelfError({
+          cause: null,
+          message: `File already exists: ${filename}`,
+          additionalData: { filename, bucketName },
+          label,
+        });
+      } catch (e) {
+        // access() throws ENOENT when file doesn't exist — that's the normal case
+        if (isLikeShelfError(e)) throw e;
+      }
+    }
+
+    await fs.writeFile(filePath, buffer);
+    return filename;
+  }
+
+  const { client, bucket } = getS3();
+  await client.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: `${bucketName}/${filename}`,
+      Body: buffer,
+      ContentType: contentType,
+    })
+  );
+
+  return filename;
 }
 
+/**
+ * Parses a multipart form submission, uploads any image files to storage,
+ * and returns the FormData with file fields replaced by their storage paths.
+ */
 export async function parseFileFormData({
   request,
   newFileName,
@@ -377,7 +426,6 @@ export async function parseFileFormData({
       const originalName =
         upload?.name ?? upload?.filename ?? file?.name ?? undefined;
 
-      // Only process image files
       if (mimeType && !mimeType.includes("image")) {
         return undefined;
       }
@@ -408,19 +456,14 @@ export async function parseFileFormData({
         thumbnailSize,
       });
 
-      // For profile pictures and other cases that don't need thumbnails,
-      // the uploadFile function returns a string path
       if (typeof uploadedFilePaths === "string") {
         return uploadedFilePaths;
       }
 
-      // For cases where thumbnails are generated, we need to store the object
-      // in a way that FormData can handle. We'll store it as a stringified JSON
       if (generateThumbnail) {
         return JSON.stringify(uploadedFilePaths);
       }
 
-      // This shouldn't happen, but if it does, return the originalPath
       return (uploadedFilePaths as { originalPath: string }).originalPath;
     };
 
@@ -462,55 +505,482 @@ export async function parseFileFormData({
 }
 
 /**
- * Recursively walks the `.cause` chain to find a `ShelfError`.
+ * Downloads an image from a URL, processes it, and uploads it to storage.
+ * Returns the stored file path, or null if the download or upload fails.
  *
- * Libraries like `@remix-run/form-data-parser` wrap errors in their own
- * `FormDataParseError`, hiding the nested ShelfError. This helper lets
- * callers recover the original message, `title`, and `shouldBeCaptured` flag.
+ * Implements a simple two-attempt retry with a 1 s delay between attempts.
+ * Uses the optional LRU cache to skip repeated downloads of the same URL.
  */
-export function findShelfErrorInCause(error: unknown): ShelfError | null {
-  if (isLikeShelfError(error)) {
-    return error;
-  }
+export async function uploadImageFromUrl(
+  imageUrl: string,
+  { filename, contentType, bucketName, resizeOptions }: UploadOptions,
+  cache?: LRUCache<string, CachedImage>
+): Promise<string | null> {
+  try {
+    let buffer: Buffer;
+    let actualContentType: string;
 
-  const cause = (error as { cause?: unknown })?.cause;
+    if (cache) {
+      const cached = cache.get(imageUrl);
+      if (cached) {
+        buffer = cached.buffer;
+        actualContentType = cached.contentType;
 
-  if (!cause) {
+        const storedPath = await storeBuffer(
+          buffer,
+          bucketName,
+          filename,
+          actualContentType,
+          true
+        );
+
+        return storedPath;
+      }
+    }
+
+    let response: Response | null = null;
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        response = await fetch(imageUrl);
+
+        if (response.ok) {
+          break;
+        } else {
+          const fetchError = new Error(
+            `HTTP ${response.status}: ${response.statusText}`
+          );
+
+          if (attempt === 2) {
+            Logger.error(
+              new ShelfError({
+                cause: fetchError,
+                message: "Failed to fetch image from URL after 2 attempts",
+                additionalData: {
+                  imageUrl,
+                  status: response.status,
+                  attempts: 2,
+                },
+                label,
+                shouldBeCaptured: false,
+              })
+            );
+            return null;
+          }
+
+          await delay(1000);
+        }
+      } catch (cause) {
+        if (attempt === 2) {
+          Logger.error(
+            new ShelfError({
+              cause,
+              message: "Failed to fetch image from URL after 2 attempts",
+              additionalData: { imageUrl, attempts: 2 },
+              label,
+              shouldBeCaptured: false,
+            })
+          );
+          return null;
+        }
+
+        await delay(1000);
+      }
+    }
+
+    if (!response) {
+      Logger.error(
+        new ShelfError({
+          cause: null,
+          message: "Unexpected null response after retry loop",
+          additionalData: { imageUrl },
+          label,
+          shouldBeCaptured: false,
+        })
+      );
+      return null;
+    }
+
+    actualContentType = response.headers.get("content-type") || contentType;
+
+    const imageBlob = await response.blob();
+    buffer = Buffer.from(await imageBlob.arrayBuffer());
+
+    const detectedImageType = detectImageFormat(buffer);
+
+    if (!actualContentType?.startsWith("image/") && !detectedImageType) {
+      throw new ShelfError({
+        cause: null,
+        message: "URL does not point to a valid image",
+        additionalData: { imageUrl, contentType: actualContentType },
+        label,
+        shouldBeCaptured: false,
+      });
+    }
+
+    if (detectedImageType && !actualContentType?.startsWith("image/")) {
+      actualContentType = detectedImageType;
+    }
+
+    if (imageBlob.size > ASSET_MAX_IMAGE_UPLOAD_SIZE) {
+      throw new ShelfError({
+        cause: null,
+        message: `Image file size exceeds maximum allowed size of ${
+          ASSET_MAX_IMAGE_UPLOAD_SIZE / (1024 * 1024)
+        }MB`,
+        additionalData: { imageUrl, size: imageBlob.size },
+        label,
+        shouldBeCaptured: false,
+      });
+    }
+
+    const processedBuffer = await cropImage(
+      (async function* () {
+        await Promise.resolve();
+        yield new Uint8Array(buffer);
+      })(),
+      resizeOptions
+    );
+
+    const storedPath = await storeBuffer(
+      Buffer.from(processedBuffer),
+      bucketName,
+      filename,
+      actualContentType,
+      true
+    );
+
+    if (cache && storedPath) {
+      await cacheStoredImage(storedPath, bucketName, imageUrl, cache);
+    }
+
+    return storedPath;
+  } catch (cause) {
+    const isShelfError = isLikeShelfError(cause);
+
+    Logger.error(
+      new ShelfError({
+        cause,
+        message: isShelfError
+          ? cause.message
+          : "Failed to process and upload image from URL",
+        additionalData: { imageUrl, filename, contentType, bucketName },
+        label,
+        shouldBeCaptured: isShelfError ? cause.shouldBeCaptured : true,
+      })
+    );
+
     return null;
   }
+}
 
-  return findShelfErrorInCause(cause);
+/** Reads the just-uploaded file back into the LRU cache (local or S3). */
+async function cacheStoredImage(
+  filePath: string,
+  bucketName: string,
+  originalUrl: string,
+  cache: LRUCache<string, CachedImage>
+): Promise<void> {
+  try {
+    let buffer: Buffer;
+    let cachedContentType = "image/jpeg";
+
+    if (isLocal) {
+      buffer = await fs.readFile(localFilePath(bucketName, filePath));
+    } else {
+      const { client, bucket } = getS3();
+      const response = await client.send(
+        new GetObjectCommand({
+          Bucket: bucket,
+          Key: `${bucketName}/${filePath}`,
+        })
+      );
+
+      if (!response.Body) return;
+      const chunks: Uint8Array[] = [];
+
+      for await (const chunk of response.Body as any) {
+        chunks.push(chunk);
+      }
+
+      buffer = Buffer.concat(chunks);
+      cachedContentType = response.ContentType ?? cachedContentType;
+    }
+
+    const image: CachedImage = {
+      buffer,
+      contentType: cachedContentType,
+      size: buffer.length,
+    };
+
+    if (image.size <= MAX_CACHE_SIZE - (cache.size || 0)) {
+      cache.set(originalUrl, image);
+    }
+  } catch (cause) {
+    Logger.error(
+      new ShelfError({
+        cause,
+        message: "Failed to cache stored image",
+        additionalData: { filePath, bucketName },
+        label: "Image Cache",
+      })
+    );
+  }
+}
+
+/** Re-export so import.image-cache.server.ts callers still compile. */
+export const MAX_CACHE_SIZE = 100 * 1024 * 1024;
+
+/**
+ * Reads a stored file into a Buffer.
+ * Used by asset duplication to copy images without a round-trip through HTTP.
+ */
+export async function readStorageFile(
+  bucketName: string,
+  filePath: string
+): Promise<Buffer> {
+  if (isLocal) {
+    return fs.readFile(localFilePath(bucketName, filePath));
+  }
+
+  const { client, bucket } = getS3();
+  const response = await client.send(
+    new GetObjectCommand({ Bucket: bucket, Key: `${bucketName}/${filePath}` })
+  );
+
+  if (!response.Body) {
+    throw new ShelfError({
+      cause: null,
+      message: "S3 returned an empty response body",
+      additionalData: { bucketName, filePath },
+      label,
+    });
+  }
+
+  const chunks: Uint8Array[] = [];
+  for await (const chunk of response.Body as AsyncIterable<Uint8Array>) {
+    chunks.push(chunk);
+  }
+
+  return Buffer.concat(chunks);
 }
 
 /**
- * Recursively walks the `.cause` chain to find a `MaxFileSizeExceededError`.
- *
- * `parseFormData` wraps errors, so this helper normalises the shape and lets
- * callers respond with the correct user-facing message when the underlying
- * file exceeds the configured size.
+ * Lists file names (without directory prefix) inside a storage directory path.
+ * Used by asset duplication to find and prune stale image variants.
  */
-function getMaxFileSizeExceededError(
-  error: unknown
-): MaxFileSizeExceededError | null {
-  if (error instanceof MaxFileSizeExceededError) {
-    return error;
+export async function listStorageFiles(
+  bucketName: string,
+  dirPath: string
+): Promise<string[]> {
+  if (isLocal) {
+    const dir = path.join(UPLOAD_DIR, bucketName, dirPath);
+    try {
+      return await fs.readdir(dir);
+    } catch (e: any) {
+      if (e?.code === "ENOENT") return [];
+      throw e;
+    }
   }
 
-  const cause = (error as { cause?: unknown })?.cause;
+  const { client, bucket } = getS3();
+  const prefix = `${bucketName}/${dirPath}/`;
+  const response = await client.send(
+    new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix })
+  );
 
-  if (!cause) {
-    return null;
-  }
-
-  return getMaxFileSizeExceededError(cause);
+  return (response.Contents ?? [])
+    .map((obj) => (obj.Key ?? "").replace(prefix, ""))
+    .filter(Boolean);
 }
 
 /**
- * Logs an error that occurred during image upload to Supoabase
- * @param cause
- * @param additionalData
+ * Writes a Buffer directly to storage (upsert).
+ * Used by asset duplication to store a copied image buffer.
  */
-function logUploadError(cause: unknown, additionalData: AdditionalData) {
+export async function writeStorageFile(
+  bucketName: string,
+  filePath: string,
+  buffer: Buffer,
+  contentType: string
+): Promise<string> {
+  return storeBuffer(buffer, bucketName, filePath, contentType, true);
+}
+
+/**
+ * Deletes a single file from storage by its relative path within a bucket.
+ * Swallows ENOENT (file already gone) so callers don't need to guard.
+ */
+export async function deleteStorageFile(
+  bucketName: string,
+  relPath: string
+): Promise<void> {
+  return deleteStoredFile(bucketName, relPath);
+}
+
+/**
+ * Deletes a profile picture from storage.
+ * The URL must contain the bucket name path segment — invalid URLs are logged and skipped.
+ * The URL must contain the bucket name path segment — invalid URLs are logged and skipped.
+ */
+export async function deleteProfilePicture({
+  url,
+  bucketName = "profile-pictures",
+}: {
+  url: string;
+  bucketName?: string;
+}) {
+  try {
+    if (!url || !url.includes(`/${bucketName}/`)) {
+      throw new ShelfError({
+        cause: null,
+        message: "Invalid file URL",
+        additionalData: { url },
+        label,
+      });
+    }
+
+    const relPath = extractPathFromUrl(url, bucketName);
+
+    if (!relPath) {
+      throw new ShelfError({
+        cause: null,
+        message: "Cannot extract the image path from the URL",
+        additionalData: { url, bucketName },
+        label,
+      });
+    }
+
+    await deleteStoredFile(bucketName, relPath);
+  } catch (cause) {
+    Logger.error(
+      new ShelfError({
+        cause,
+        message: "Failed to delete the profile picture",
+        additionalData: { url, bucketName },
+        label,
+      })
+    );
+  }
+}
+
+/**
+ * Deletes an asset image from storage.
+ * Logs and swallows errors so a missing image does not block asset mutations.
+ */
+export async function deleteAssetImage({
+  url,
+  bucketName,
+}: {
+  url: string;
+  bucketName: string;
+}) {
+  try {
+    const relPath = extractPathFromUrl(url, bucketName);
+
+    if (!relPath) {
+      throw new ShelfError({
+        cause: null,
+        message: "Cannot extract the image path from the URL",
+        additionalData: { url, bucketName },
+        label,
+      });
+    }
+
+    await deleteStoredFile(bucketName, relPath);
+    return true;
+  } catch (cause) {
+    Logger.error(
+      new ShelfError({
+        cause,
+        message: "Failed to delete the asset image",
+        additionalData: { url, bucketName },
+        label,
+      })
+    );
+  }
+}
+
+/**
+ * Returns the storage key path for a location or audit file upload.
+ * Format: `{organizationId}/{type}/{typeId}/{randomId}`
+ */
+export function getFileUploadPath({
+  organizationId,
+  type,
+  typeId,
+}: {
+  organizationId: string;
+  type: "locations" | "audits";
+  typeId: string;
+}): string {
+  return `${organizationId}/${type}/${typeId}/${id()}`;
+}
+
+/**
+ * Removes a public file from the PUBLIC_BUCKET ("files").
+ * Throws a ShelfError on failure (unlike deleteAssetImage which swallows errors).
+ */
+export async function removePublicFile({
+  publicUrl,
+}: {
+  publicUrl: string;
+}): Promise<void> {
+  try {
+    const relPath = extractPathFromUrl(publicUrl, PUBLIC_BUCKET);
+
+    if (!relPath) {
+      throw new ShelfError({
+        cause: null,
+        message: "Invalid file URL",
+        additionalData: { publicUrl },
+        label,
+      });
+    }
+
+    await deleteStoredFile(PUBLIC_BUCKET, relPath);
+  } catch (cause) {
+    throw new ShelfError({
+      cause,
+      message: isLikeShelfError(cause)
+        ? cause.message
+        : "Failed to remove file. Please try again.",
+      label,
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/** Deletes a file from the active storage driver. */
+async function deleteStoredFile(
+  bucketName: string,
+  relPath: string
+): Promise<void> {
+  if (isLocal) {
+    const filePath = localFilePath(bucketName, relPath);
+    try {
+      await fs.unlink(filePath);
+    } catch (cause: any) {
+      // Treat ENOENT as success — the file is gone either way
+      if (cause?.code !== "ENOENT") throw cause;
+    }
+    return;
+  }
+
+  const { client, bucket } = getS3();
+  await client.send(
+    new DeleteObjectCommand({
+      Bucket: bucket,
+      Key: `${bucketName}/${relPath}`,
+    })
+  );
+}
+
+/** Logs an upload error without rethrowing. */
+function logUploadError(cause: unknown, additionalData: AdditionalData): void {
   Logger.error(
     new ShelfError({
       cause,
@@ -522,9 +992,9 @@ function logUploadError(cause: unknown, additionalData: AdditionalData) {
 }
 
 /**
- * Normalise the various shapes `parseFormData` can hand us for file payloads
+ * Normalises the various shapes that parseFormData can hand us for file payloads
  * (Blob, File, Buffer, Node streams, async iterables) into an AsyncIterable
- * that Sharp can consume without crashing.
+ * that Sharp can consume.
  */
 async function normalizeToAsyncIterable(
   file:
@@ -536,9 +1006,7 @@ async function normalizeToAsyncIterable(
     | null
     | undefined
 ): Promise<AsyncIterable<Uint8Array> | null> {
-  if (!file) {
-    return null;
-  }
+  if (!file) return null;
 
   if (typeof (file as any)[Symbol.asyncIterator] === "function") {
     return file as AsyncIterable<Uint8Array>;
@@ -555,7 +1023,6 @@ async function normalizeToAsyncIterable(
     })();
   }
 
-  // Remix now uses the undici File polyfill which exposes stream()/arrayBuffer()
   if (typeof (file as Blob).stream === "function") {
     const webStream = (file as Blob).stream();
     if (typeof Readable.fromWeb === "function") {
@@ -577,423 +1044,45 @@ async function normalizeToAsyncIterable(
 }
 
 /**
- * Downloads and processes an image from a URL for upload
- * Implements caching of Supabase-optimized versions for repeated URLs
+ * Recursively walks the `.cause` chain to find a ShelfError.
+ *
+ * Libraries like @remix-run/form-data-parser wrap errors in their own
+ * FormDataParseError, hiding the nested ShelfError. This helper recovers
+ * the original message, title, and shouldBeCaptured flag.
  */
-export async function uploadImageFromUrl(
-  imageUrl: string,
-  { filename, contentType, bucketName, resizeOptions }: UploadOptions,
-  cache?: LRUCache<string, CachedImage>
-): Promise<string | null> {
-  try {
-    let buffer: Buffer;
-    let actualContentType: string;
+export function findShelfErrorInCause(error: unknown): ShelfError | null {
+  if (isLikeShelfError(error)) return error;
 
-    // Check cache first if provided
-    if (cache) {
-      const cached = cache.get(imageUrl);
-      if (cached) {
-        buffer = cached.buffer;
-        actualContentType = cached.contentType;
+  const cause = (error as { cause?: unknown })?.cause;
+  if (!cause) return null;
 
-        // Upload cached optimized version
-        const { data, error } = await getSupabaseAdmin()
-          .storage.from(bucketName)
-          .upload(filename, buffer, {
-            contentType: actualContentType,
-            upsert: true,
-            metadata: {
-              source: "url",
-              originalUrl: imageUrl,
-            },
-          });
-
-        if (error) {
-          /** Log the error so we are aware if there are some issues with uploading */
-          logUploadError(error, {
-            imageUrl,
-            filename,
-            contentType,
-            bucketName,
-          });
-
-          throw error;
-        }
-        return data.path;
-      }
-    }
-
-    // If not in cache, download the image with retry logic
-    let response: Response | null = null;
-    let fetchError: Error | null = null;
-
-    // Try to fetch the image up to 2 times
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        response = await fetch(imageUrl);
-
-        if (response.ok) {
-          fetchError = null;
-          break; // Success, exit retry loop
-        } else {
-          fetchError = new Error(
-            `HTTP ${response.status}: ${response.statusText}`
-          );
-          if (attempt === 2) {
-            // Last attempt failed, log and return null
-            Logger.error(
-              new ShelfError({
-                cause: fetchError,
-                message: "Failed to fetch image from URL after 2 attempts",
-                additionalData: {
-                  imageUrl,
-                  status: response.status,
-                  attempts: 2,
-                },
-                label,
-                shouldBeCaptured: false,
-              })
-            );
-            return null;
-          }
-          // Wait a moment before retrying
-          await delay(1000);
-        }
-      } catch (cause) {
-        fetchError = cause as Error;
-        if (attempt === 2) {
-          // Last attempt failed, log and return null
-          Logger.error(
-            new ShelfError({
-              cause: fetchError,
-              message: "Failed to fetch image from URL after 2 attempts",
-              additionalData: {
-                imageUrl,
-                attempts: 2,
-              },
-              label,
-              shouldBeCaptured: false,
-            })
-          );
-          return null;
-        }
-        // Wait a moment before retrying
-        await delay(1000);
-      }
-    }
-
-    // This should not happen due to the early returns above, but TypeScript needs the check
-    if (!response) {
-      Logger.error(
-        new ShelfError({
-          cause: null,
-          message: "Unexpected null response after retry loop",
-          additionalData: { imageUrl },
-          label,
-          shouldBeCaptured: false,
-        })
-      );
-      return null;
-    }
-
-    actualContentType = response.headers.get("content-type") || contentType;
-
-    // Get the response as a buffer to validate the actual content
-    const imageBlob = await response.blob();
-    buffer = Buffer.from(await imageBlob.arrayBuffer());
-
-    // For URLs that don't return proper image content-type headers (like Sortly),
-    // detect the image format from the actual file content using magic bytes
-    const detectedImageType = detectImageFormat(buffer);
-
-    if (!actualContentType?.startsWith("image/") && !detectedImageType) {
-      throw new ShelfError({
-        cause: null,
-        message: "URL does not point to a valid image",
-        additionalData: { imageUrl, contentType: actualContentType },
-        label,
-        shouldBeCaptured: false,
-      });
-    }
-
-    // Use detected format if HTTP header doesn't provide proper image content-type
-    if (detectedImageType && !actualContentType?.startsWith("image/")) {
-      actualContentType = detectedImageType;
-    }
-
-    if (imageBlob.size > ASSET_MAX_IMAGE_UPLOAD_SIZE) {
-      throw new ShelfError({
-        cause: null,
-        message: `Image file size exceeds maximum allowed size of ${
-          ASSET_MAX_IMAGE_UPLOAD_SIZE / (1024 * 1024)
-        }MB`,
-        additionalData: { imageUrl, size: imageBlob.size },
-        label,
-        shouldBeCaptured: false,
-      });
-    }
-
-    const file = await cropImage(
-      (async function* webResponseToIterable() {
-        await Promise.resolve();
-        yield new Uint8Array(buffer);
-      })(),
-      resizeOptions
-    );
-
-    // Upload to Supabase
-    const { data, error } = await getSupabaseAdmin()
-      .storage.from(bucketName)
-      .upload(filename, file, {
-        contentType: actualContentType,
-        upsert: true,
-        metadata: {
-          source: "url",
-          originalUrl: imageUrl,
-        },
-      });
-
-    if (error) {
-      /** Log the error so we are aware if there are some issues with uploading */
-      logUploadError(error, {
-        imageUrl,
-        filename,
-        contentType,
-        bucketName,
-      });
-      throw error;
-    }
-
-    // After successful upload, cache the optimized version if cache is provided
-    if (cache && data.path) {
-      await cacheOptimizedImage(data.path, imageUrl, cache);
-    }
-
-    return data.path;
-  } catch (cause) {
-    const isShelfError = isLikeShelfError(cause);
-
-    // Log the error and return null instead of throwing
-    // This allows the import process to continue without the image
-    Logger.error(
-      new ShelfError({
-        cause,
-        message: isShelfError
-          ? cause.message
-          : "Failed to process and upload image from URL",
-        additionalData: { imageUrl, filename, contentType, bucketName },
-        label,
-        shouldBeCaptured: isShelfError ? cause.shouldBeCaptured : true,
-      })
-    );
-
-    return null; // Return null to indicate failure, allowing import to continue
-  }
-}
-
-export async function deleteProfilePicture({
-  url,
-  bucketName = "profile-pictures",
-}: {
-  url: string;
-  bucketName?: string;
-}) {
-  try {
-    if (
-      !url.startsWith(
-        `${SUPABASE_URL}/storage/v1/object/public/profile-pictures/`
-      ) ||
-      url === ""
-    ) {
-      throw new ShelfError({
-        cause: null,
-        message: "Invalid file URL",
-        additionalData: { url },
-        label,
-      });
-    }
-
-    const { error } = await getSupabaseAdmin()
-      .storage.from(bucketName)
-      .remove([url.split(`${bucketName}/`)[1]]);
-
-    if (error) {
-      throw error;
-    }
-  } catch (cause) {
-    Logger.error(
-      new ShelfError({
-        cause,
-        message: "Fail to delete the profile picture",
-        additionalData: { url, bucketName },
-        label,
-      })
-    );
-  }
-}
-
-export async function deleteAssetImage({
-  url,
-  bucketName,
-}: {
-  url: string;
-  bucketName: string;
-}) {
-  try {
-    const path = extractImageNameFromSupabaseUrl({ url, bucketName });
-    if (!path) {
-      throw new ShelfError({
-        cause: null,
-        message: "Cannot extract the image path from the URL",
-        additionalData: { url, bucketName },
-        label,
-      });
-    }
-
-    const { error } = await getSupabaseAdmin()
-      .storage.from(bucketName)
-      .remove([path]);
-
-    if (error) {
-      throw error;
-    }
-
-    return true;
-  } catch (cause) {
-    Logger.error(
-      new ShelfError({
-        cause,
-        message: "Fail to delete the asset image",
-        additionalData: { url, bucketName },
-        label,
-      })
-    );
-  }
+  return findShelfErrorInCause(cause);
 }
 
 /**
- * This function constructs the path for the file to be uploaded to Supabase storage.
+ * Recursively walks the `.cause` chain to find a MaxFileSizeExceededError.
  */
-export function getFileUploadPath({
-  organizationId,
-  type,
-  typeId,
-}: {
-  organizationId: string;
-  type: "locations" | "audits";
-  typeId: string;
-}) {
-  return `${organizationId}/${type}/${typeId}/${id()}`;
+function getMaxFileSizeExceededError(
+  error: unknown
+): MaxFileSizeExceededError | null {
+  if (error instanceof MaxFileSizeExceededError) return error;
+
+  const cause = (error as { cause?: unknown })?.cause;
+  if (!cause) return null;
+
+  return getMaxFileSizeExceededError(cause);
 }
 
-/**
- * This function remove the public file from `files` bucket in Supabase using a public URL.
- */
-export async function removePublicFile({ publicUrl }: { publicUrl: string }) {
-  try {
-    if (
-      !publicUrl.startsWith(
-        `${SUPABASE_URL}/storage/v1/object/public/${PUBLIC_BUCKET}/`
-      )
-    ) {
-      throw new ShelfError({
-        cause: null,
-        message: "Invalid file URL",
-        additionalData: { publicUrl },
-        label,
-      });
-    }
+// ---------------------------------------------------------------------------
+// Legacy Supabase error-shape helpers
+// These are kept as exported stubs so that existing tests and any call sites
+// that import them continue to compile. They always return false since the new
+// storage drivers do not produce Supabase-shaped errors.
+// ---------------------------------------------------------------------------
 
-    const { error } = await getSupabaseAdmin()
-      .storage.from(PUBLIC_BUCKET)
-      .remove([publicUrl.split(`${PUBLIC_BUCKET}/`)[1]]);
-
-    if (error) {
-      throw error;
-    }
-  } catch (cause) {
-    throw new ShelfError({
-      cause,
-      message: isLikeShelfError(cause)
-        ? cause.message
-        : "Failed to remove file. Please try again.",
-      label,
-    });
-  }
-}
-
-/**
- * Supabase can sporadically return HTML error pages (e.g., CDN/edge 50x) that the storage
- * client surfaces as StorageUnknownError due to JSON parsing. Detect that shape so callers
- * can retry instead of immediately failing user-visible flows.
- */
-function isSupabaseHtmlError(error: unknown) {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-
-  const message =
-    "message" in error && typeof error.message === "string"
-      ? error.message
-      : "";
-  const name =
-    "name" in error && typeof error.name === "string" ? error.name : "";
-
-  // Detect JSON parse failures that typically show up when HTML is returned instead of JSON
-  const lowerMessage = message.toLowerCase();
-  const isJsonParseFailure =
-    lowerMessage.includes("unexpected token") && lowerMessage.includes("json");
-  const mentionsHtml =
-    lowerMessage.includes("<html") ||
-    lowerMessage.includes("html>") ||
-    lowerMessage.includes("text/html");
-  const isUnexpectedHtml =
-    isJsonParseFailure && (mentionsHtml || lowerMessage.includes("<"));
-  const isStorageUnknown =
-    name === "StorageUnknownError" ||
-    ("__isStorageError" in error &&
-      typeof error.__isStorageError === "boolean" &&
-      error.__isStorageError === true);
-
-  return isUnexpectedHtml && isStorageUnknown;
-}
-
-/**
- * Supabase can also surface network failures as StorageUnknownError with a
- * generic "fetch failed" message. Treat those as transient for retries.
- */
-function isSupabaseFetchFailedError(error: unknown) {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-
-  const message =
-    "message" in error && typeof error.message === "string"
-      ? error.message
-      : "";
-  const name =
-    "name" in error && typeof error.name === "string" ? error.name : "";
-
-  const lowerMessage = message.toLowerCase();
-  const isFetchFailed = lowerMessage.includes("fetch failed");
-  const isStorageUnknown =
-    name === "StorageUnknownError" ||
-    ("__isStorageError" in error &&
-      typeof error.__isStorageError === "boolean" &&
-      error.__isStorageError === true);
-
-  return isFetchFailed && isStorageUnknown;
-}
-
-/**
- * Supabase returns HTTP 429 when too many requests hit the storage API.
- * The client surfaces this as a StorageApiError. Detect it so callers
- * can back off and retry instead of immediately failing.
- */
-export function isSupabaseRateLimitError(error: unknown) {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
+/** @deprecated No longer meaningful; kept for test compatibility only. */
+export function isSupabaseRateLimitError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
 
   const name =
     "name" in error && typeof error.name === "string" ? error.name : "";
@@ -1015,15 +1104,9 @@ export function isSupabaseRateLimitError(error: unknown) {
   return isStorageApiError && (isRateLimitStatus || isRateLimitMessage);
 }
 
-/**
- * Supabase returns HTTP 5xx (502, 503, 504, etc.) on transient infrastructure
- * issues like gateway timeouts. The client surfaces these as StorageApiError.
- * Detect them so callers can retry instead of immediately failing.
- */
-export function isSupabaseServerError(error: unknown) {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
+/** @deprecated No longer meaningful; kept for test compatibility only. */
+export function isSupabaseServerError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
 
   const name =
     "name" in error && typeof error.name === "string" ? error.name : "";

@@ -6,8 +6,6 @@ declare global {
   interface Window {
     env: {
       NODE_ENV: "development" | "production" | "test";
-      SUPABASE_URL: string;
-      SUPABASE_ANON_PUBLIC: string;
       MAPTILER_TOKEN: string;
       MICROSOFT_CLARITY_ID: string;
       CRISP_WEBSITE_ID: string;
@@ -16,7 +14,6 @@ declare global {
       MAINTENANCE_MODE: string;
       CHROME_EXECUTABLE_PATH: string;
       URL_SHORTENER: string;
-      FREE_TRIAL_DAYS: string;
       SENTRY_DSN: string;
       SUPPORT_EMAIL: string;
       FULL_CALENDAR_LICENSE_KEY: string;
@@ -30,40 +27,31 @@ declare global {
   namespace NodeJS {
     interface ProcessEnv {
       NODE_ENV: "development" | "production" | "test";
-      SUPABASE_URL: string;
-      SUPABASE_SERVICE_ROLE: string;
       SERVER_URL: string;
       URL_SHORTENER: string;
-      SUPABASE_ANON_PUBLIC: string;
       SESSION_SECRET: string;
       MAPTILER_TOKEN: string;
       CRISP_WEBSITE_ID: string;
       MICROSOFT_CLARITY_ID: string;
       CLOUDFLARE_WEB_ANALYTICS_TOKEN: string;
-      STRIPE_SECRET_KEY: string;
-      STRIPE_WEBHOOK_ENDPOINT_SECRET: string;
       ENABLE_PREMIUM_FEATURES: string;
       DISABLE_SIGNUP: string;
-      DISABLE_SSO: string;
       INVITE_TOKEN_SECRET: string;
-      SMTP_PWD: string;
-      SMTP_HOST: string;
-      SMTP_PORT: string;
-      SMTP_USER: string;
-      SMTP_FROM: string;
+      RELAY_API_KEY: string;
+      RELAY_SMTP_KEY: string;
       MAINTENANCE_MODE: string;
       DATABASE_URL: string;
-      DIRECT_URL: string;
+      DATABASE_AUTH_TOKEN: string;
       SENTRY_DSN: string;
       ADMIN_EMAIL: string;
       CHROME_EXECUTABLE_PATH: string;
       FINGERPRINT: string;
-      FREE_TRIAL_DAYS: string;
       SUPPORT_EMAIL: string;
       FULL_CALENDAR_LICENSE_KEY: string;
       SHOW_HOW_DID_YOU_FIND_US: string;
       COLLECT_BUSINESS_INTEL: string;
       COOKIE_DOMAIN: string;
+      SEND_ONBOARDING_EMAIL: string;
     }
   }
 }
@@ -84,8 +72,6 @@ export function getEnv<K extends keyof NodeJS.ProcessEnv>(
 
   const value = (source as NodeJS.ProcessEnv)[name];
 
-  // If allowEmpty is true, only check for undefined/null
-  // Otherwise, keep current behavior (treats empty string as "not set")
   if (allowEmpty) {
     if ((value === undefined || value === null) && isRequired) {
       throw new ShelfError({
@@ -130,7 +116,6 @@ export function initEnv() {
  * Server env
  */
 export const SERVER_URL = getEnv("SERVER_URL").replace(/\/+$/, "");
-export const SUPABASE_SERVICE_ROLE = getEnv("SUPABASE_SERVICE_ROLE");
 export const INVITE_TOKEN_SECRET = getEnv("INVITE_TOKEN_SECRET", {
   isSecret: true,
 });
@@ -138,12 +123,6 @@ export const URL_SHORTENER = getEnv("URL_SHORTENER", {
   isRequired: false,
 });
 
-/**
- * Cookie domain for cross-subdomain cookie sharing.
- * Set to ".shelf.nu" in production so the marketing site can read
- * the user-prefs cookie to detect signed-in users.
- * Trimmed and coerced to undefined if empty/whitespace.
- */
 export const COOKIE_DOMAIN =
   getEnv("COOKIE_DOMAIN", {
     isSecret: false,
@@ -156,27 +135,25 @@ export const FINGERPRINT = getEnv("FINGERPRINT", {
   isRequired: false,
 });
 
-export const STRIPE_SECRET_KEY = getEnv("STRIPE_SECRET_KEY", {
-  isSecret: true,
-  isRequired: false,
-});
-export const STRIPE_WEBHOOK_ENDPOINT_SECRET = getEnv(
-  "STRIPE_WEBHOOK_ENDPOINT_SECRET",
-  { isSecret: true, isRequired: false }
-);
-export const SMTP_PWD = getEnv("SMTP_PWD", { allowEmpty: true });
-export const SMTP_HOST = getEnv("SMTP_HOST");
-export const SMTP_PORT = getEnv("SMTP_PORT", {
-  isRequired: false,
-});
-export const SMTP_USER = getEnv("SMTP_USER", { allowEmpty: true });
-export const SMTP_FROM = getEnv("SMTP_FROM", {
-  isRequired: false,
-});
+/** Relay email service credentials */
+export const RELAY_API_KEY =
+  getEnv("RELAY_API_KEY", {
+    isSecret: true,
+    isRequired: false,
+  }) || "";
+export const RELAY_SMTP_KEY =
+  getEnv("RELAY_SMTP_KEY", {
+    isSecret: true,
+    isRequired: false,
+  }) || "";
+
 export const DATABASE_URL = getEnv("DATABASE_URL");
-export const DIRECT_URL = getEnv("DIRECT_URL", {
-  isRequired: false,
-});
+export const DATABASE_AUTH_TOKEN =
+  getEnv("DATABASE_AUTH_TOKEN", {
+    isRequired: false,
+    allowEmpty: true,
+  }) || "";
+
 export const SENTRY_DSN = getEnv("SENTRY_DSN", {
   isSecret: false,
   isRequired: false,
@@ -186,10 +163,6 @@ export const ADMIN_EMAIL = getEnv("ADMIN_EMAIL", {
   isRequired: false,
 });
 
-/**
- * A comma separated list of customerIds that have custom install of shelf.
- * We need this in order to make our webhook work properly.
- */
 export const CUSTOM_INSTALL_CUSTOMERS = getEnv("CUSTOM_INSTALL_CUSTOMERS", {
   isRequired: false,
 });
@@ -201,13 +174,11 @@ export const NODE_ENV = getEnv("NODE_ENV", {
   isSecret: false,
   isRequired: false,
 });
-export const SUPABASE_URL = getEnv("SUPABASE_URL", { isSecret: false });
-export const SUPABASE_ANON_PUBLIC = getEnv("SUPABASE_ANON_PUBLIC", {
-  isSecret: false,
-});
-export const MAPTILER_TOKEN = getEnv("MAPTILER_TOKEN", {
-  isSecret: false,
-});
+export const MAPTILER_TOKEN =
+  getEnv("MAPTILER_TOKEN", {
+    isSecret: false,
+    isRequired: false,
+  }) || "";
 export const CRISP_WEBSITE_ID = getEnv("CRISP_WEBSITE_ID", {
   isSecret: false,
   isRequired: false,
@@ -249,11 +220,8 @@ export const MAINTENANCE_MODE =
     isRequired: false,
   }) === "true" || false;
 
-export const ENABLE_PREMIUM_FEATURES =
-  getEnv("ENABLE_PREMIUM_FEATURES", {
-    isSecret: false,
-    isRequired: false,
-  }) === "true" || false;
+// Always false in self-hosted mode — all features are available
+export const ENABLE_PREMIUM_FEATURES = false;
 
 export const SHOW_HOW_DID_YOU_FIND_US =
   getEnv("SHOW_HOW_DID_YOU_FIND_US", {
@@ -267,20 +235,8 @@ export const COLLECT_BUSINESS_INTEL =
     isRequired: false,
   }) === "true" || false;
 
-export const FREE_TRIAL_DAYS =
-  getEnv("FREE_TRIAL_DAYS", {
-    isSecret: false,
-    isRequired: false,
-  }) || "14";
-
 export const DISABLE_SIGNUP =
   getEnv("DISABLE_SIGNUP", {
-    isSecret: false,
-    isRequired: false,
-  }) === "true" || false;
-
-export const DISABLE_SSO =
-  getEnv("DISABLE_SSO", {
     isSecret: false,
     isRequired: false,
   }) === "true" || false;
@@ -296,22 +252,59 @@ export const CHROME_EXECUTABLE_PATH = getEnv("CHROME_EXECUTABLE_PATH", {
   isRequired: false,
 });
 
+/** Storage driver: "local" (default) or "s3" */
+export const STORAGE_DRIVER =
+  getEnv("STORAGE_DRIVER", { isSecret: false, isRequired: false }) || "local";
+
+/** Root directory for local file uploads (used when STORAGE_DRIVER=local). */
+export const UPLOAD_DIR =
+  getEnv("UPLOAD_DIR", { isSecret: false, isRequired: false }) ||
+  "/data/uploads";
+
+/** S3-compatible storage configuration (used when STORAGE_DRIVER=s3). */
+export const S3_ENDPOINT = getEnv("S3_ENDPOINT", {
+  isSecret: true,
+  isRequired: false,
+});
+export const S3_BUCKET = getEnv("S3_BUCKET", {
+  isSecret: false,
+  isRequired: false,
+});
+export const S3_ACCESS_KEY_ID = getEnv("S3_ACCESS_KEY_ID", {
+  isSecret: true,
+  isRequired: false,
+});
+export const S3_SECRET_ACCESS_KEY = getEnv("S3_SECRET_ACCESS_KEY", {
+  isSecret: true,
+  isRequired: false,
+});
+export const S3_REGION = getEnv("S3_REGION", {
+  isSecret: false,
+  isRequired: false,
+});
+export const S3_PUBLIC_URL = getEnv("S3_PUBLIC_URL", {
+  isSecret: false,
+  isRequired: false,
+});
+export const S3_FORCE_PATH_STYLE =
+  getEnv("S3_FORCE_PATH_STYLE", { isSecret: false, isRequired: false }) ===
+  "true";
+
 export function getBrowserEnv() {
   return {
     NODE_ENV,
-    SUPABASE_URL,
-    SUPABASE_ANON_PUBLIC,
     MAPTILER_TOKEN,
     CRISP_WEBSITE_ID,
     MICROSOFT_CLARITY_ID,
     CLOUDFLARE_WEB_ANALYTICS_TOKEN,
-    ENABLE_PREMIUM_FEATURES,
-    MAINTENANCE_MODE,
+    ENABLE_PREMIUM_FEATURES: String(ENABLE_PREMIUM_FEATURES),
+    MAINTENANCE_MODE: String(MAINTENANCE_MODE),
     CHROME_EXECUTABLE_PATH,
     URL_SHORTENER,
-    FREE_TRIAL_DAYS,
     SUPPORT_EMAIL,
     FULL_CALENDAR_LICENSE_KEY,
     SENTRY_DSN,
+    SHOW_HOW_DID_YOU_FIND_US: String(SHOW_HOW_DID_YOU_FIND_US),
+    COLLECT_BUSINESS_INTEL: String(COLLECT_BUSINESS_INTEL),
   };
 }

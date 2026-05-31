@@ -89,10 +89,10 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
      */
     if (modelFilters.name === "teamMember") {
       where.OR.push(
-        { name: { contains: queryValue, mode: "insensitive" } },
-        { user: { firstName: { contains: queryValue, mode: "insensitive" } } },
-        { user: { firstName: { contains: queryValue, mode: "insensitive" } } },
-        { user: { email: { contains: queryValue, mode: "insensitive" } } }
+        { name: { contains: queryValue } },
+        { user: { firstName: { contains: queryValue } } },
+        { user: { firstName: { contains: queryValue } } },
+        { user: { email: { contains: queryValue } } }
       );
 
       where.deletedAt = modelFilters.deletedAt;
@@ -118,7 +118,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       }
     } else {
       where.OR.push({
-        [queryKey]: { contains: queryValue, mode: "insensitive" },
+        [queryKey]: { contains: queryValue },
       });
     }
 

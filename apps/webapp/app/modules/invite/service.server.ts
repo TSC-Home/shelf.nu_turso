@@ -25,6 +25,7 @@ import type { ErrorLabel } from "~/utils/error";
 import { ShelfError, isLikeShelfError } from "~/utils/error";
 import { getCurrentSearchParams } from "~/utils/http.server";
 import { getParamsValues } from "~/utils/list";
+import { parseRoles } from "~/utils/roles";
 import { checkDomainSSOStatus, doesSSOUserExist } from "~/utils/sso.server";
 import { generateRandomCode, inviteEmailText, splitName } from "./helpers";
 import { processInvitationMessage } from "./message-validator.server";
@@ -115,10 +116,11 @@ export async function getExistingActiveInvite({
 }
 
 export async function createInvite(
-  payload: Pick<
-    Invite,
-    "inviterId" | "inviteeEmail" | "organizationId" | "roles"
+  payload: Omit<
+    Pick<Invite, "inviterId" | "inviteeEmail" | "organizationId" | "roles">,
+    "roles"
   > & {
+    roles: OrganizationRoles[];
     teamMemberName: TeamMember["name"];
     teamMemberId?: Invite["teamMemberId"];
     userId: string;
@@ -255,7 +257,7 @@ export async function createInvite(
 
     if (roles.length) {
       Object.assign(data, {
-        roles,
+        roles: JSON.stringify(roles),
       });
     }
 
@@ -368,7 +370,7 @@ export async function updateInviteStatus({
       const user = await createUserOrAttachOrg({
         email: invite.inviteeEmail,
         organizationId: invite.organizationId,
-        roles: invite.roles,
+        roles: parseRoles(invite.roles),
         password,
         firstName,
         lastName,
@@ -506,14 +508,14 @@ export async function getPaginatedAndFilterableSettingInvites({
       inviteWhere.OR = [
         {
           inviteeTeamMember: {
-            name: { contains: search, mode: "insensitive" },
+            name: { contains: search },
           },
         },
         {
           inviteeUser: {
             OR: [
-              { firstName: { contains: search, mode: "insensitive" } },
-              { lastName: { contains: search, mode: "insensitive" } },
+              { firstName: { contains: search } },
+              { lastName: { contains: search } },
             ],
           },
         },
@@ -552,7 +554,7 @@ export async function getPaginatedAndFilterableSettingInvites({
      * Create the same structure for the invites
      */
     const items = invites.map((invite) => {
-      const roleEnum = invite.roles[0] ?? OrganizationRoles.BASE;
+      const roleEnum = parseRoles(invite.roles)[0] ?? OrganizationRoles.BASE;
       return {
         id: invite.id,
         name: invite.inviteeTeamMember.name,
@@ -854,7 +856,7 @@ export async function bulkInviteUsers({
         organizationId,
         inviteeEmail: payload.email,
         teamMemberId: getTeamMemberId(payload),
-        roles: [payload.role],
+        roles: JSON.stringify([payload.role]),
         expiresAt,
         inviteCode: generateRandomCode(6),
         status: InviteStatuses.PENDING,

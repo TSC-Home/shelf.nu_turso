@@ -1,5 +1,6 @@
 import { OrganizationRoles } from "@prisma/client";
 import { db } from "~/database/db.server";
+import { parseRoles } from "~/utils/roles";
 
 import {
   Role2PermissionMap,
@@ -37,7 +38,7 @@ export async function hasPermission(
         });
       }
 
-      roles = userOrg.roles;
+      roles = parseRoles(userOrg.roles);
     }
 
     if (

@@ -54,13 +54,13 @@ export function getUpdatesForUser({
         // Updates with no role targeting (visible to all)
         {
           targetRoles: {
-            isEmpty: true,
+            equals: "[]", // SQLite: targetRoles is JSON string
           },
         },
         // Updates that target the user's role
         {
           targetRoles: {
-            has: userRole,
+            contains: `"${userRole}"`, // SQLite: targetRoles is JSON string
           },
         },
       ],
@@ -98,13 +98,13 @@ export function getUnreadCountForUser({
         // Updates with no role targeting (visible to all)
         {
           targetRoles: {
-            isEmpty: true,
+            equals: "[]", // SQLite: targetRoles is JSON string
           },
         },
         // Updates that target the user's role
         {
           targetRoles: {
-            has: userRole,
+            contains: `"${userRole}"`, // SQLite: targetRoles is JSON string
           },
         },
       ],
@@ -175,12 +175,12 @@ export async function markAllUpdatesAsRead({
       OR: [
         {
           targetRoles: {
-            isEmpty: true,
+            equals: "[]", // SQLite: targetRoles is JSON string
           },
         },
         {
           targetRoles: {
-            has: userRole,
+            contains: `"${userRole}"`, // SQLite: targetRoles is JSON string
           },
         },
       ],
@@ -346,7 +346,8 @@ export async function createUpdate({
         imageUrl: imageUrl === undefined ? null : imageUrl, // Convert undefined to null for database
         publishDate,
         status,
-        targetRoles,
+        // SQLite: targetRoles is stored as a JSON string
+        targetRoles: JSON.stringify(targetRoles ?? []),
         createdById,
       },
     });
@@ -392,7 +393,10 @@ export async function updateUpdate({
         ...(imageUrl !== undefined && { imageUrl }),
         ...(publishDate !== undefined && { publishDate }),
         ...(status !== undefined && { status }),
-        ...(targetRoles !== undefined && { targetRoles }),
+        // SQLite: targetRoles is stored as a JSON string
+        ...(targetRoles !== undefined && {
+          targetRoles: JSON.stringify(targetRoles),
+        }),
       },
     });
   } catch (cause) {

@@ -107,7 +107,12 @@ export default function EditUpdate() {
         imageUrl={update.imageUrl}
         publishDate={new Date(update.publishDate)}
         status={update.status}
-        targetRoles={update.targetRoles}
+        // SQLite: targetRoles is a JSON string — parse before passing
+        targetRoles={
+          typeof update.targetRoles === "string"
+            ? (JSON.parse(update.targetRoles) as OrganizationRoles[])
+            : (update.targetRoles as unknown as OrganizationRoles[])
+        }
       />
     </Card>
   );

@@ -121,13 +121,14 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       });
     }
 
+    // SQLite stores options as JSON string; serialize before passing to service
     await updateCustomField({
       id,
       name,
       helpText,
       active,
       required,
-      options,
+      options: options != null ? JSON.stringify(options) : undefined,
       categories,
       organizationId,
     });

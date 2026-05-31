@@ -7,7 +7,6 @@ import type {
   Prisma,
 } from "@prisma/client";
 import { db } from "~/database/db.server";
-import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import {
   DEFAULT_MAX_IMAGE_UPLOAD_SIZE,
   PUBLIC_BUCKET,
@@ -16,6 +15,7 @@ import type { ErrorLabel } from "~/utils/error";
 import { isLikeShelfError, ShelfError } from "~/utils/error";
 import {
   getFileUploadPath,
+  getPublicFileURL,
   parseFileFormData,
   removePublicFile,
 } from "~/utils/storage.server";
@@ -136,18 +136,17 @@ export async function uploadAuditImage({
     }
 
     // Get public URLs for the uploaded images
-    const {
-      data: { publicUrl: imagePublicUrl },
-    } = getSupabaseAdmin().storage.from(PUBLIC_BUCKET).getPublicUrl(imagePath);
+    const imagePublicUrl = getPublicFileURL({
+      filename: imagePath,
+      bucketName: PUBLIC_BUCKET,
+    });
 
     let thumbnailPublicUrl: string | undefined;
     if (thumbnailPath) {
-      const {
-        data: { publicUrl },
-      } = getSupabaseAdmin()
-        .storage.from(PUBLIC_BUCKET)
-        .getPublicUrl(thumbnailPath);
-      thumbnailPublicUrl = publicUrl;
+      thumbnailPublicUrl = getPublicFileURL({
+        filename: thumbnailPath,
+        bucketName: PUBLIC_BUCKET,
+      });
     }
 
     // Create the database record

@@ -1,12 +1,11 @@
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
 }
 
 generator client {
   provider        = "prisma-client-js"
-  previewFeatures = ["fullTextSearchPostgres"]
+  previewFeatures = ["driverAdapters"]
 }
 
 model Image {
@@ -34,21 +33,16 @@ model Image {
 }
 
 model User {
-  id                    String  @id @default(cuid())
-  email                 String  @unique
-  username              String  @unique @default(cuid())
-  firstName             String?
-  lastName              String?
-  displayName           String?
-  profilePicture        String?
-  usedFreeTrial         Boolean @default(false)
-  onboarded             Boolean @default(false)
-  customerId            String? @unique // Stripe customer id
-  sso                   Boolean @default(false)
-  createdWithInvite     Boolean @default(false) // Set to true if the user was created by being invited to a workspace
-  skipSubscriptionCheck Boolean @default(false) // Set to true if the user has opted out of subscription checks
-  hasUnpaidInvoice     Boolean @default(false) // Set via Stripe webhooks when invoice payment fails
-  warnForNoPaymentMethod Boolean @default(false) // Set when subscription is transferred to a user without a payment method
+  id            String  @id @default(cuid())
+  email         String  @unique
+  username      String  @unique @default(cuid())
+  firstName     String?
+  lastName      String?
+  displayName   String?
+  profilePicture String?
+  onboarded     Boolean @default(false)
+  sso           Boolean @default(false)
+  createdWithInvite Boolean @default(false)
 
   // Last selected organization for cross-device workspace persistence
   lastSelectedOrganization   Organization? @relation("lastSelectedOrg", fields: [lastSelectedOrganizationId], references: [id], onDelete: SetNull)
@@ -83,8 +77,6 @@ model User {
   bookings           Booking[]          @relation("creator")
   custodies          Booking[]          @relation("custodian")
   createdKits        Kit[]
-  tierId             TierId             @default(free)
-  tier               Tier               @relation(fields: [tierId], references: [id])
   assetReminders     AssetReminder[]
   contact            UserContact?
   businessIntel      UserBusinessIntel?
@@ -95,7 +87,7 @@ model User {
   auditImagesUploaded AuditImage[] @relation("AuditImageUploader")
 
   // @deprecated - Historical data only. New entries go to UserBusinessIntel table
-  referralSource String? // "How did you hear about us?" field.
+  referralSource String?
 
   // A user can have multiple asset index settings, 1 for each organization
   assetIndexSettings AssetIndexSettings[]
@@ -106,9 +98,6 @@ model User {
   createdUpdates Update[]
   updateReads    UserUpdateRead[]
 
-  // This relationship will be used only when tierId == custom
-  customTierLimit CustomTierLimit?
-
   assetFilterPresets AssetFilterPreset[]
 
   // Role change audit log
@@ -118,11 +107,33 @@ model User {
   // Admin notes authored on team member profiles
   teamMemberNotesAuthored TeamMemberNote[] @relation("TeamMemberNoteAuthor")
 
+  // Custom auth relations
+  password UserPassword?
+  sessions UserSession[]
+
   @@unique([email, username])
   @@index([firstName, lastName])
-  // Indexes for foreign keys
-  @@index([tierId])
+  // Index for foreign key
   @@index([lastSelectedOrganizationId])
+}
+
+model UserPassword {
+  id     String @id @default(cuid())
+  userId String @unique
+  hash   String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model UserSession {
+  id           String   @id @default(cuid())
+  userId       String
+  refreshToken String   @unique
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 model UserContact {
@@ -143,27 +154,24 @@ model UserContact {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Indexes for efficient querying
-  @@index([userId]) // Foreign key index
-  @@index([phone]) // For phone number lookups
-  @@index([city, stateProvince]) // For location-based queries
-  @@index([countryRegion]) // For country-based filtering
-  @@index([zipPostalCode]) // For postal code searches
-  @@index([city, countryRegion]) // For city within country queries
+  @@index([userId])
+  @@index([phone])
+  @@index([city, stateProvince])
+  @@index([countryRegion])
+  @@index([zipPostalCode])
+  @@index([city, countryRegion])
 }
 
 model UserBusinessIntel {
   id String @id @default(cuid())
 
-  // Business intelligence fields collected during onboarding
-  // Note: User.referralSource is deprecated and kept for historical data
-  howDidYouHearAboutUs String? // "How did you hear about us?" - new entries go here
-  jobTitle             String? // User's role
-  teamSize             String? // Number of people using Shelf
-  companyName          String? // Company or organization name
-  primaryUseCase       String? // What they'll primarily track
-  currentSolution      String? // How they currently track assets
-  timeline             String? // When they need Shelf working
+  howDidYouHearAboutUs String?
+  jobTitle             String?
+  teamSize             String?
+  companyName          String?
+  primaryUseCase       String?
+  currentSolution      String?
+  timeline             String?
 
   // Relationships
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
@@ -173,11 +181,10 @@ model UserBusinessIntel {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Indexes for efficient querying
-  @@index([userId]) // Foreign key index
-  @@index([companyName]) // For company-based analytics
-  @@index([jobTitle]) // For role-based analytics
-  @@index([teamSize]) // For team size analytics
+  @@index([userId])
+  @@index([companyName])
+  @@index([jobTitle])
+  @@index([teamSize])
 }
 
 model Asset {
@@ -188,9 +195,9 @@ model Asset {
   thumbnailImage      String?
   mainImageExpiration DateTime?
   status              AssetStatus @default(AVAILABLE)
-  valuation           Float?      @map("value") // Field to store the monetary value of an asset
+  valuation           Float?      @map("value")
   availableToBook     Boolean     @default(true)
-  sequentialId        String? // Sequential identifier for the asset (e.g., "SAM-0001")
+  sequentialId        String?
 
   // Datetime
   createdAt DateTime @default(now())
@@ -222,10 +229,9 @@ model Asset {
 
   // Unique constraint for organization-scoped sequential IDs
   @@unique([organizationId, sequentialId], name: "asset_org_sequential_unique")
-  // Special GIN index for optimization of simple search queries
-  @@index([title(ops: raw("gin_trgm_ops")), description(ops: raw("gin_trgm_ops"))], type: Gin)
-  // Trigram index for substring search on sequentialId (e.g. "21035" → "SAM-21035")
-  @@index([sequentialId(ops: raw("gin_trgm_ops"))], type: Gin, name: "Asset_sequentialId_trgm_idx")
+  // Indexes for search and filtering
+  @@index([title, description])
+  @@index([sequentialId], name: "Asset_sequentialId_idx")
   // Indexes for optimization of queries
   @@index([organizationId, title, status, availableToBook], name: "Asset_organizationId_compound_idx")
   @@index([status, organizationId], name: "Asset_status_organizationId_idx")
@@ -234,7 +240,6 @@ model Asset {
   @@index([categoryId, organizationId], name: "Asset_categoryId_organizationId_idx")
   @@index([locationId, organizationId], name: "Asset_locationId_organizationId_idx")
   @@index([kitId, organizationId], name: "Asset_kitId_organizationId_idx")
-  @@index([sequentialId], name: "Asset_sequentialId_idx")
   // Index for foreign key
   @@index([userId])
 }
@@ -265,22 +270,14 @@ model AssetFilterPreset {
 model AssetIndexSettings {
   id String @id @default(cuid())
 
-  // Relationships
-  // This is the user who's settings we are storing
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   userId String
 
-  // This is the organizationId for which the user is setting the index settings
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onUpdate: Cascade, onDelete: Cascade)
 
-  // Settings fields
   mode AssetIndexMode @default(SIMPLE)
 
-  // Holds the columns that are visible in the index view in json format
-  // Format is {name: string, visible: boolean, position: number}[] where name is the name of the column, visible is whether the column is visible or not and position is the position of the column
-  // The shape of the JSON includes both some fixed entries that will always be present and some dynamic entries for the custom fields
-  // The fixed entries are: id, status, description, valuation, createdAt, category, tags, location, kit, custody
   columns Json @default("[ {\"name\": \"id\", \"visible\": true, \"position\": 0}, {\"name\": \"status\", \"visible\": true, \"position\": 1}, {\"name\": \"description\", \"visible\": true, \"position\": 2}, {\"name\": \"valuation\", \"visible\": true, \"position\": 3}, {\"name\": \"createdAt\", \"visible\": true, \"position\": 4}, {\"name\": \"category\", \"visible\": true, \"position\": 5}, {\"name\": \"tags\", \"visible\": true, \"position\": 6}, {\"name\": \"location\", \"visible\": true, \"position\": 7}, {\"name\": \"kit\", \"visible\": true, \"position\": 8}, {\"name\": \"custody\", \"visible\": true, \"position\": 9} ]")
 
   freezeColumn   Boolean @default(true)
@@ -321,12 +318,9 @@ model Category {
   organization   Organization @relation(fields: [organizationId], references: [id], onUpdate: Cascade, onDelete: Cascade)
   organizationId String
 
-  //@@unique([lower(name), organizationId]) //prisma doesnt support case insensitive unique index yet
-  // Indexes for foreign keys
   @@index([organizationId])
   @@index([userId])
-  // Trigram index for substring search from the asset-list search bar
-  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, name: "Category_name_trgm_idx")
+  @@index([name], name: "Category_name_idx")
 }
 
 enum TagUseFor {
@@ -340,7 +334,7 @@ model Tag {
   description String?
   color       String?
 
-  useFor TagUseFor[] @default([ASSET])
+  useFor String @default("[\"ASSET\"]")
 
   //relations
   assets Asset[]
@@ -356,12 +350,9 @@ model Tag {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  //@@unique([lower(name), organizationId]) //prisma doesnt support case insensitive unique index yet
-  // Indexes for foreign keys
   @@index([organizationId])
   @@index([userId])
-  // Trigram index for substring search from the asset-list search bar
-  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, name: "Tag_name_trgm_idx")
+  @@index([name], name: "Tag_name_idx")
 }
 
 model Note {
@@ -432,10 +423,8 @@ enum NoteType {
 model Qr {
   id String @id @default(cuid())
 
-  // Version of the QR code based on spec from Denso wave
   version Int @default(0)
 
-  // Error correction level based on spec from Denso wave
   errorCorrection ErrorCorrection @default(L)
 
   // Relationships
@@ -451,7 +440,6 @@ model Qr {
   organization   Organization? @relation(fields: [organizationId], references: [id], onUpdate: Cascade)
   organizationId String?
 
-  // This batch is used to group QR codes together when they are created as unclaimed and printed
   batch   PrintBatch? @relation(fields: [batchId], references: [id], onDelete: SetNull)
   batchId String?
 
@@ -461,23 +449,19 @@ model Qr {
   scans     Scan[]
 
   @@index([assetId], name: "Qr_assetId_idx")
-  // Indexes for foreign keys
   @@index([kitId])
   @@index([userId])
   @@index([organizationId])
   @@index([batchId])
-  // Trigram index for substring search of Qr ids from the asset-list search bar
-  @@index([id(ops: raw("gin_trgm_ops"))], type: Gin, name: "Qr_id_trgm_idx")
+  @@index([id], name: "Qr_id_idx")
 }
 
 // Barcode model
 model Barcode {
   id String @id @default(cuid())
 
-  // The actual barcode value (separate from DB ID)
-  value String // e.g., "BC001234", "ASSET-2024-001"
+  value String
 
-  // Barcode type (matching zxing format names exactly)
   type BarcodeType @default(Code128)
 
   // Relationships
@@ -496,16 +480,13 @@ model Barcode {
 
   // Organization-scoped uniqueness for barcode values
   @@unique([organizationId, value])
-  // Performance indexes for common queries
-  @@index([organizationId, value]) // Lightning fast lookup by org + value
+  @@index([organizationId, value])
   @@index([assetId])
   @@index([kitId])
-  @@index([organizationId]) // For org-level queries
-  // Trigram index for substring search of barcode values from the asset-list search bar
-  @@index([value(ops: raw("gin_trgm_ops"))], type: Gin, name: "Barcode_value_trgm_idx")
+  @@index([organizationId])
+  @@index([value], name: "Barcode_value_idx")
 }
 
-// Barcode types matching zxing format names exactly
 enum BarcodeType {
   Code128
   Code39
@@ -519,7 +500,6 @@ model PrintBatch {
 
   name String @unique
 
-  // This should be set to true, when QR code is exported for print
   printed Boolean @default(false)
 
   // Relationships
@@ -530,7 +510,6 @@ model PrintBatch {
   updatedAt DateTime @updatedAt
 }
 
-// Stores a report for when a an asset is reported as found
 model ReportFound {
   id      String @id @default(cuid())
   email   String
@@ -567,17 +546,14 @@ model Scan {
 
   userAgent String?
 
-  // When a logged in user scanned the QR code, we store it here
   user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
   userId String?
 
   qr   Qr?     @relation(fields: [qrId], references: [id], onDelete: SetNull)
   qrId String?
 
-  // We also store the qrId as a raw string for reference is fhte qr is deleted
   rawQrId String
 
-  // This will be true if the user manually created the scan by using "Update GPS coordinates"
   manuallyGenerated Boolean @default(false)
 
   // DateTime
@@ -625,13 +601,10 @@ model Location {
   parent   Location?  @relation("LocationHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
   children Location[] @relation("LocationHierarchy")
 
-  // @@unique([lower(name), organizationId]) //prisma doesnt support case insensitive unique index yet
-  // Indexes for foreign keys
   @@index([organizationId])
   @@index([userId])
   @@index([organizationId, parentId])
-  // Trigram index for substring search from the asset-list search bar
-  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, name: "Location_name_trgm_idx")
+  @@index([name], name: "Location_name_idx")
 }
 
 // Master data for roles
@@ -673,9 +646,7 @@ model TeamMember {
   alwaysNotifyBookingSettings BookingSettings[] @relation("BookingSettingsAlwaysNotify")
   bookingNotifications        Booking[]         @relation("BookingNotificationRecipients")
 
-  // Special GIN index for optimization of simple search queries
-  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin)
-  // Indexes for foreign keys
+  @@index([name], name: "TeamMember_name_idx")
   @@index([organizationId])
   @@index([userId])
 }
@@ -713,33 +684,24 @@ model Organization {
   image   Image?  @relation("orgImage", fields: [imageId], references: [id])
   imageId String? @unique
 
-  // Not required. It will only be created for orgs that need sso
-  // We can know if an org has SSO by checking the ssoDetailsId
-  enabledSso      Boolean          @default(false) // If true, the organization has enabled SSO. This cannot be changed by the user, just managed by the admin
+  // SSO config (kept for schema compatibility, not actively used in self-hosted mode)
+  enabledSso      Boolean          @default(false)
   ssoDetailsId    String?
   ssoDetails      SsoDetails?      @relation(fields: [ssoDetailsId], references: [id])
   workingHours    WorkingHours?
   bookingSettings BookingSettings?
 
   // Permissions configuration
-  // those values are used to control the access to the custody and bookings by SELF SERVICE and BASE users
-  selfServiceCanSeeCustody  Boolean @default(false) // If true, the self service users can see custody of assets inside the organization
-  selfServiceCanSeeBookings Boolean @default(false) // If true, the self service users can see bookings that are not theirs
-  baseUserCanSeeCustody     Boolean @default(false) // If true, the base users can see the custody of assets inside the organization
-  baseUserCanSeeBookings    Boolean @default(false) // If true, the base users can see the bookings that are not theirs
+  selfServiceCanSeeCustody  Boolean @default(false)
+  selfServiceCanSeeBookings Boolean @default(false)
+  baseUserCanSeeCustody     Boolean @default(false)
+  baseUserCanSeeBookings    Boolean @default(false)
 
-  // Barcode add-on (per-organization, managed via Stripe subscription)
-  barcodesEnabled   Boolean   @default(false) // If true, this organization can use barcode functionality
-  barcodesEnabledAt DateTime? // Track when barcode feature was enabled
-  usedBarcodeTrial  Boolean   @default(false) // Set once a 7-day free barcode trial is activated (prevents reuse)
+  // Feature flags — default true in self-hosted mode (no trial/paywall logic)
+  barcodesEnabled Boolean @default(true)
+  auditsEnabled   Boolean @default(true)
 
-  // Audit add-on (per-organization, managed via Stripe subscription)
-  auditsEnabled    Boolean   @default(false) // If true, this organization can use audit functionality
-  auditsEnabledAt  DateTime? // Track when audit feature was enabled
-  usedAuditTrial   Boolean   @default(false) // Set once a 7-day free audit trial is activated (prevents reuse)
-
-  // This is used to disable the workspace for the user. It is set to true when the user leaves the workspace
-  workspaceDisabled Boolean @default(false) // If true, the workspace is disabled and the user cannot access it
+  workspaceDisabled Boolean @default(false)
 
   locations         Location[]
   categories        Category[]
@@ -767,17 +729,17 @@ model Organization {
   teamMemberNotes     TeamMemberNote[]
   activityEvents      ActivityEvent[]
 
-  // Migration flag to track if sequential IDs have been generated for this organization's existing assets
   hasSequentialIdsMigrated Boolean @default(false)
 
-  // QR code display preference - which ID to show on QR code labels
   qrIdDisplayPreference QrIdDisplayPreference @default(QR_ID)
 
-  // Branding preference for downloadable labels
   showShelfBranding Boolean @default(true)
 
-  // Custom footer text appended to workspace emails
-  customEmailFooter String? @db.VarChar(500)
+  labelBrandingText String?
+  labelCustomText   String?
+  labelTemplate     LabelTemplate @default(SQUARE)
+
+  customEmailFooter String?
 
   // Indexes for foreign keys
   @@index([userId])
@@ -792,9 +754,9 @@ model UserOrganization {
   organization   Organization @relation(fields: [organizationId], references: [id], onUpdate: Cascade, onDelete: Cascade)
   organizationId String
 
-  roles     OrganizationRoles[]
-  createdAt DateTime            @default(now())
-  updatedAt DateTime            @updatedAt
+  roles     String   @default("[]")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([userId, organizationId])
   // Index for foreign key
@@ -807,8 +769,13 @@ enum OrganizationType {
 }
 
 enum QrIdDisplayPreference {
-  QR_ID // Display the QR code ID (current default)
-  SAM_ID // Display the sequential/SAM ID
+  QR_ID
+  SAM_ID
+}
+
+enum LabelTemplate {
+  SQUARE
+  HORIZONTAL_50X30
 }
 
 enum OrganizationRoles {
@@ -821,69 +788,17 @@ enum OrganizationRoles {
 model SsoDetails {
   id String @id @default(cuid())
 
-  // The domains of the organization. Comma separated for multiple domains
   domain String
 
   organizations Organization[]
 
-  baseUserGroupId    String? // The group id for BASE users
-  selfServiceGroupId String? // The group id for SELF_SERVICE users
-  adminGroupId       String? // The group id for ADMIN users
+  baseUserGroupId    String?
+  selfServiceGroupId String?
+  adminGroupId       String?
 
   // Datetime
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-}
-
-// Tier Ids are used to identify tiers (products) in Stripe. They must be predictable in our model.
-// Each product in stripe has a metadata value called `shelf_tier` which holds the value of the enum
-// Add more tiers if needed
-enum TierId {
-  free
-  tier_1
-  tier_2
-  custom
-}
-
-// Tiers correspond to Stripe products
-model Tier {
-  id          TierId     @id // Used to create Stripe product ID
-  name        String // Name coming from Stripe product
-  subscribers User[]
-  tierLimitId TierId?    @unique
-  tierLimit   TierLimit? @relation(fields: [tierLimitId], references: [id])
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
-}
-
-// TierLimit is used for the basic tiers
-model TierLimit {
-  id                   TierId   @id
-  tier                 Tier?
-  canImportAssets      Boolean  @default(false)
-  canExportAssets      Boolean  @default(false)
-  canImportNRM         Boolean  @default(false)
-  canHideShelfBranding Boolean  @default(false)
-  maxCustomFields      Int      @default(0)
-  maxOrganizations     Int      @default(1)
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
-}
-
-// CustomTierLimit is used for users which has Tier with ID: custom
-model CustomTierLimit {
-  id                   String   @id @default(cuid())
-  user                 User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
-  userId               String?  @unique // This is the foreign key
-  canImportAssets      Boolean  @default(true)
-  canExportAssets      Boolean  @default(true)
-  canImportNRM         Boolean  @default(true)
-  canHideShelfBranding Boolean  @default(true)
-  maxCustomFields      Int      @default(1000)
-  maxOrganizations     Int      @default(1)
-  isEnterprise         Boolean  @default(false) // Set this to true for enterprise users. It is used to control some visuals in the app
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
 }
 
 model CustomField {
@@ -894,7 +809,7 @@ model CustomField {
   active   Boolean @default(true)
 
   type    CustomFieldType @default(TEXT)
-  options String[]
+  options String @default("[]")
 
   // Relationships
   organization   Organization @relation(fields: [organizationId], references: [id], onUpdate: Cascade, onDelete: Cascade)
@@ -911,8 +826,6 @@ model CustomField {
   deletedAt               DateTime?
   assetCustomFieldsValues AssetCustomFieldValue[]
 
-  //@@unique([lower(name), organizationId]) //prisma doesnt support case insensitive unique index yet
-  // Indexes for foreign keys
   @@index([organizationId])
   @@index([userId])
   @@index([organizationId, deletedAt])
@@ -931,8 +844,7 @@ enum CustomFieldType {
 model AssetCustomFieldValue {
   id String @id @default(cuid())
 
-  // value String
-  value Json //{raw: "actual data",valueText:"text type",valueBoolean:"boolean type" and so on... }
+  value Json
 
   // Relationships
   asset   Asset  @relation(fields: [assetId], references: [id], onDelete: Cascade, onUpdate: Cascade)
@@ -951,164 +863,162 @@ model AssetCustomFieldValue {
 }
 
 // ISO 4217 Currency Codes
-// See app/utils/currency.ts for the canonical list with full metadata
-// Sorted alphabetically by currency code
 enum Currency {
-  AED // UAE Dirham
-  AFN // Afghani
-  ALL // Lek
-  AMD // Armenian Dram
-  ANG // Netherlands Antillean Guilder
-  AOA // Kwanza
-  ARS // Argentine Peso
-  AUD // Australian Dollar
-  AWG // Aruban Florin
-  AZN // Azerbaijan Manat
-  BAM // Convertible Mark
-  BBD // Barbados Dollar
-  BDT // Taka
-  BGN // Bulgarian Lev
-  BHD // Bahraini Dinar
-  BIF // Burundi Franc
-  BMD // Bermudian Dollar
-  BND // Brunei Dollar
-  BOB // Boliviano
-  BRL // Brazilian Real
-  BSD // Bahamian Dollar
-  BTN // Ngultrum
-  BWP // Pula
-  BYN // Belarusian Ruble
-  BZD // Belize Dollar
-  CAD // Canadian Dollar
-  CDF // Congolese Franc
-  CHF // Swiss Franc
-  CLP // Chilean Peso
-  CNY // Yuan Renminbi
-  COP // Colombian Peso
-  CRC // Costa Rican Colon
-  CUP // Cuban Peso
-  CVE // Cabo Verde Escudo
-  CZK // Czech Koruna
-  DJF // Djibouti Franc
-  DKK // Danish Krone
-  DOP // Dominican Peso
-  DZD // Algerian Dinar
-  EGP // Egyptian Pound
-  ERN // Nakfa
-  ETB // Ethiopian Birr
-  EUR // Euro
-  FJD // Fiji Dollar
-  FKP // Falkland Islands Pound
-  GBP // Pound Sterling
-  GEL // Lari
-  GHS // Ghana Cedi
-  GIP // Gibraltar Pound
-  GMD // Dalasi
-  GNF // Guinean Franc
-  GTQ // Quetzal
-  GYD // Guyana Dollar
-  HKD // Hong Kong Dollar
-  HNL // Lempira
-  HTG // Gourde
-  HUF // Forint
-  IDR // Rupiah
-  ILS // New Israeli Sheqel
-  INR // Indian Rupee
-  IQD // Iraqi Dinar
-  IRR // Iranian Rial
-  ISK // Iceland Krona
-  JMD // Jamaican Dollar
-  JOD // Jordanian Dinar
-  JPY // Yen
-  KES // Kenyan Shilling
-  KGS // Som
-  KHR // Riel
-  KMF // Comorian Franc
-  KPW // North Korean Won
-  KRW // Won
-  KWD // Kuwaiti Dinar
-  KYD // Cayman Islands Dollar
-  KZT // Tenge
-  LAK // Lao Kip
-  LBP // Lebanese Pound
-  LKR // Sri Lanka Rupee
-  LRD // Liberian Dollar
-  LSL // Loti
-  LYD // Libyan Dinar
-  MAD // Moroccan Dirham
-  MDL // Moldovan Leu
-  MGA // Malagasy Ariary
-  MKD // Denar
-  MMK // Kyat
-  MNT // Tugrik
-  MOP // Pataca
-  MRU // Ouguiya
-  MUR // Mauritius Rupee
-  MVR // Rufiyaa
-  MWK // Malawi Kwacha
-  MXN // Mexican Peso
-  MYR // Malaysian Ringgit
-  MZN // Mozambique Metical
-  NAD // Namibia Dollar
-  NGN // Naira
-  NIO // Cordoba Oro
-  NOK // Norwegian Krone
-  NPR // Nepalese Rupee
-  NZD // New Zealand Dollar
-  OMR // Rial Omani
-  PAB // Balboa
-  PEN // Sol
-  PGK // Kina
-  PHP // Philippine Peso
-  PKR // Pakistan Rupee
-  PLN // Zloty
-  PYG // Guarani
-  QAR // Qatari Rial
-  RON // Romanian Leu
-  RSD // Serbian Dinar
-  RUB // Russian Ruble
-  RWF // Rwanda Franc
-  SAR // Saudi Riyal
-  SBD // Solomon Islands Dollar
-  SCR // Seychelles Rupee
-  SDG // Sudanese Pound
-  SEK // Swedish Krona
-  SGD // Singapore Dollar
-  SHP // Saint Helena Pound
-  SLE // Leone
-  SOS // Somali Shilling
-  SRD // Surinam Dollar
-  SSP // South Sudanese Pound
-  STN // Dobra
-  SVC // El Salvador Colon
-  SYP // Syrian Pound
-  SZL // Lilangeni
-  THB // Baht
-  TJS // Somoni
-  TMT // Turkmenistan Manat
-  TND // Tunisian Dinar
-  TOP // Pa'anga
-  TRY // Turkish Lira
-  TTD // Trinidad and Tobago Dollar
-  TWD // New Taiwan Dollar
-  TZS // Tanzanian Shilling
-  UAH // Hryvnia
-  UGX // Uganda Shilling
-  USD // US Dollar
-  UYU // Peso Uruguayo
-  UZS // Uzbekistan Sum
-  VES // Bolívar Soberano
-  VND // Dong
-  VUV // Vatu
-  WST // Tala
-  XAF // CFA Franc BEAC
-  XCD // East Caribbean Dollar
-  XOF // CFA Franc BCEAO
-  XPF // CFP Franc
-  YER // Yemeni Rial
-  ZAR // Rand
-  ZMW // Zambian Kwacha
-  ZWL // Zimbabwe Dollar
+  AED
+  AFN
+  ALL
+  AMD
+  ANG
+  AOA
+  ARS
+  AUD
+  AWG
+  AZN
+  BAM
+  BBD
+  BDT
+  BGN
+  BHD
+  BIF
+  BMD
+  BND
+  BOB
+  BRL
+  BSD
+  BTN
+  BWP
+  BYN
+  BZD
+  CAD
+  CDF
+  CHF
+  CLP
+  CNY
+  COP
+  CRC
+  CUP
+  CVE
+  CZK
+  DJF
+  DKK
+  DOP
+  DZD
+  EGP
+  ERN
+  ETB
+  EUR
+  FJD
+  FKP
+  GBP
+  GEL
+  GHS
+  GIP
+  GMD
+  GNF
+  GTQ
+  GYD
+  HKD
+  HNL
+  HTG
+  HUF
+  IDR
+  ILS
+  INR
+  IQD
+  IRR
+  ISK
+  JMD
+  JOD
+  JPY
+  KES
+  KGS
+  KHR
+  KMF
+  KPW
+  KRW
+  KWD
+  KYD
+  KZT
+  LAK
+  LBP
+  LKR
+  LRD
+  LSL
+  LYD
+  MAD
+  MDL
+  MGA
+  MKD
+  MMK
+  MNT
+  MOP
+  MRU
+  MUR
+  MVR
+  MWK
+  MXN
+  MYR
+  MZN
+  NAD
+  NGN
+  NIO
+  NOK
+  NPR
+  NZD
+  OMR
+  PAB
+  PEN
+  PGK
+  PHP
+  PKR
+  PLN
+  PYG
+  QAR
+  RON
+  RSD
+  RUB
+  RWF
+  SAR
+  SBD
+  SCR
+  SDG
+  SEK
+  SGD
+  SHP
+  SLE
+  SOS
+  SRD
+  SSP
+  STN
+  SVC
+  SYP
+  SZL
+  THB
+  TJS
+  TMT
+  TND
+  TOP
+  TRY
+  TTD
+  TWD
+  TZS
+  UAH
+  UGX
+  USD
+  UYU
+  UZS
+  VES
+  VND
+  VUV
+  WST
+  XAF
+  XCD
+  XOF
+  XPF
+  YER
+  ZAR
+  ZMW
+  ZWL
 }
 
 enum InviteStatuses {
@@ -1134,8 +1044,8 @@ model Invite {
   inviteeEmail  String
   status        InviteStatuses      @default(PENDING)
   inviteCode    String
-  roles         OrganizationRoles[]
-  inviteMessage String?             @db.VarChar(1000)
+  roles         String  @default("[]")
+  inviteMessage String?
 
   // Datetime
   expiresAt DateTime
@@ -1203,22 +1113,19 @@ model Booking {
   partialCheckins PartialBookingCheckin[]
 
   // Datetime
-  createdAt DateTime @default(now()) @db.Timestamptz(3)
-  updatedAt DateTime @updatedAt @db.Timestamptz(3)
-  from      DateTime @db.Timestamptz(3)
-  to        DateTime @db.Timestamptz(3)
+  createdAt DateTime
+  updatedAt DateTime @updatedAt
+  from      DateTime
+  to        DateTime
 
-  // When a booking is early check-in or early check-out, we store the original from and to
-  // dates here and updated the from and to dates to current date (if users agrees to change)
-  originalFrom DateTime? @db.Timestamptz(3)
-  originalTo   DateTime? @db.Timestamptz(3)
+  originalFrom DateTime?
+  originalTo   DateTime?
 
-  // When a booking is auto-archived, we store the timestamp here
-  autoArchivedAt DateTime? @db.Timestamptz(3)
+  autoArchivedAt DateTime?
 
   cancellationReason String?
 
-  // Per-booking notification recipients (team members who receive all email updates for this booking)
+  // Per-booking notification recipients
   notificationRecipients TeamMember[] @relation("BookingNotificationRecipients")
 
   // Indexes for foreign keys
@@ -1226,30 +1133,28 @@ model Booking {
   @@index([custodianTeamMemberId])
   @@index([custodianUserId])
   @@index([organizationId])
-  // Speeds up status filtering when joining from Asset → Booking
-  // (e.g. fetching ONGOING/OVERDUE bookings for asset custodian display)
   @@index([status])
 }
 
 model BookingSettings {
   id String @id @default(cuid())
 
-  bufferStartTime Int     @default(0) // Buffer time in hours for bookings. This is used to prevent short term bookings
-  tagsRequired    Boolean @default(false) // Whether tags are required for bookings
+  bufferStartTime Int     @default(0)
+  tagsRequired    Boolean @default(false)
 
-  maxBookingLength               Int? // Maximum booking length in hours. NULL means no limit
-  maxBookingLengthSkipClosedDays Boolean @default(false) // If true, the max booking length will skip closed days
+  maxBookingLength               Int?
+  maxBookingLengthSkipClosedDays Boolean @default(false)
 
-  autoArchiveBookings Boolean @default(false) // Whether to automatically archive completed bookings
-  autoArchiveDays     Int     @default(2) // Number of days after completion before auto-archiving
+  autoArchiveBookings Boolean @default(false)
+  autoArchiveDays     Int     @default(2)
 
-  requireExplicitCheckinForAdmin      Boolean @default(false) // When true, admins must use explicit check-in (scanner) instead of quick check-in
-  requireExplicitCheckinForSelfService Boolean @default(false) // When true, self-service users must use explicit check-in (scanner) instead of quick check-in
+  requireExplicitCheckinForAdmin      Boolean @default(false)
+  requireExplicitCheckinForSelfService Boolean @default(false)
 
   // Notification settings
-  notifyBookingCreator     Boolean @default(true) // Whether the booking creator receives email notifications
-  notifyAdminsOnNewBooking Boolean @default(true) // Whether all admins receive a notification when a booking is reserved
-  alwaysNotifyTeamMembers  TeamMember[] @relation("BookingSettingsAlwaysNotify") // Team members who always receive ALL booking email notifications
+  notifyBookingCreator     Boolean @default(true)
+  notifyAdminsOnNewBooking Boolean @default(true)
+  alwaysNotifyTeamMembers  TeamMember[] @relation("BookingSettingsAlwaysNotify")
 
   // Relationships
   organization   Organization @relation(fields: [organizationId], references: [id], onUpdate: Cascade, onDelete: Cascade)
@@ -1266,12 +1171,11 @@ model BookingSettings {
 model PartialBookingCheckin {
   id String @id @default(cuid())
 
-  // Track which assets were checked in during this session
-  assetIds     String[] // Array of asset IDs checked in
-  checkinCount Int // Number of assets checked in (for quick reference)
+  assetIds     String @default("[]")
+  checkinCount Int
 
   // Metadata
-  checkinTimestamp DateTime @default(now()) @db.Timestamptz(3)
+  checkinTimestamp DateTime @default(now())
 
   // Relationships
   booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
@@ -1287,7 +1191,7 @@ model PartialBookingCheckin {
   @@index([bookingId])
   @@index([checkedInById])
   @@index([checkinTimestamp])
-  @@index([bookingId, checkinTimestamp]) // Composite for efficient booking history queries
+  @@index([bookingId, checkinTimestamp])
 }
 
 model Kit {
@@ -1324,10 +1228,10 @@ model Kit {
   // Indexes for foreign keys
   @@index([createdById])
   @@index([organizationId])
-  @@index([categoryId, organizationId]) //for basic category/organization lookups
-  @@index([categoryId, organizationId, createdAt]) //for time-based queries
-  @@index([categoryId, organizationId, name]) //for name-based searches
-  @@index([categoryId, organizationId, status]) //for status filtering
+  @@index([categoryId, organizationId])
+  @@index([categoryId, organizationId, createdAt])
+  @@index([categoryId, organizationId, name])
+  @@index([categoryId, organizationId, status])
 }
 
 enum KitStatus {
@@ -1368,36 +1272,24 @@ model AssetReminder {
   createdAt                DateTime     @default(now())
   updatedAt                DateTime     @updatedAt
 
-  // Optimized indexes
   @@index([assetId, alertDateTime])
-  // Keeping these indexes as they were added for a purpose
-  @@index([name(ops: raw("gin_trgm_ops")), message(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([name, message])
   @@index([organizationId, alertDateTime, assetId])
-  // For scheduler related queries
   @@index([alertDateTime, activeSchedulerReference])
-  // Index for foreign key
   @@index([createdById])
 }
 
 model WorkingHours {
   id String @id @default(cuid())
 
-  // Global enable/disable for the organization
   enabled Boolean @default(false)
 
-  // Weekly schedule stored as JSON for better performance
-  // Format: { "0": { "isOpen": true, "openTime": "09:00", "closeTime": "17:00" }, ... }
-  // Keys are day numbers (0=Sunday, 1=Monday, etc.)
-  // Times are wall-clock "HH:MM" (24-hour) — no timezone conversion. These
-  // describe when the physical location is open, so they are interpreted as
-  // local wall time, not UTC.
   weeklySchedule Json @default("{\"0\":{\"isOpen\":false},\"1\":{\"isOpen\":true,\"openTime\":\"09:00\",\"closeTime\":\"17:00\"},\"2\":{\"isOpen\":true,\"openTime\":\"09:00\",\"closeTime\":\"17:00\"},\"3\":{\"isOpen\":true,\"openTime\":\"09:00\",\"closeTime\":\"17:00\"},\"4\":{\"isOpen\":true,\"openTime\":\"09:00\",\"closeTime\":\"17:00\"},\"5\":{\"isOpen\":true,\"openTime\":\"09:00\",\"closeTime\":\"17:00\"},\"6\":{\"isOpen\":false}}")
 
   // Relationships
   organization   Organization @relation(fields: [organizationId], references: [id], onUpdate: Cascade, onDelete: Cascade)
   organizationId String       @unique
 
-  // Only overrides need separate table for better querying
   overrides WorkingHoursOverride[]
 
   // Datetime
@@ -1408,16 +1300,14 @@ model WorkingHours {
   @@index([organizationId])
 }
 
-// Keep overrides separate for efficient date-based queries
 model WorkingHoursOverride {
   id String @id @default(cuid())
 
-  date   DateTime @db.Date
+  date   DateTime
   isOpen Boolean  @default(false)
 
-  // Wall-clock "HH:MM" (24-hour) — no timezone conversion (see WorkingHours).
-  openTime  String? // Format: "09:00"
-  closeTime String? // Format: "17:00"
+  openTime  String?
+  closeTime String?
   reason    String?
 
   workingHours   WorkingHours @relation(fields: [workingHoursId], references: [id], onDelete: Cascade, onUpdate: Cascade)
@@ -1440,14 +1330,13 @@ model Update {
   id String @id @default(cuid())
 
   title       String
-  content     String // Markdown content
-  url         String? // Optional URL to redirect to when clicked
-  imageUrl    String? // Optional featured image URL (external hosting)
-  publishDate DateTime // When the update should be visible to users
+  content     String
+  url         String?
+  imageUrl    String?
+  publishDate DateTime
   status      UpdateStatus @default(DRAFT)
 
-  // Role targeting - if null, visible to all roles
-  targetRoles OrganizationRoles[]
+  targetRoles String @default("[]")
 
   // Analytics
   clickCount Int @default(0)
@@ -1456,7 +1345,6 @@ model Update {
   // Relations
   userReads UserUpdateRead[]
 
-  // Creator tracking
   createdBy   User   @relation(fields: [createdById], references: [id], onDelete: Cascade, onUpdate: Cascade)
   createdById String
 
@@ -1479,7 +1367,6 @@ model UserUpdateRead {
   update   Update @relation(fields: [updateId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   updateId String
 
-  // Track when it was read
   readAt DateTime @default(now())
 
   @@unique([userId, updateId])
@@ -1523,7 +1410,6 @@ model AuditNote {
   auditSession   AuditSession @relation(fields: [auditSessionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   auditSessionId String
 
-  // Optional link to specific asset within the audit
   auditAsset   AuditAsset? @relation(fields: [auditAssetId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   auditAssetId String?
 
@@ -1542,20 +1428,15 @@ model TeamMemberNote {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Relationships
-  // The admin who wrote the note
   user   User?   @relation("TeamMemberNoteAuthor", fields: [userId], references: [id], onUpdate: Cascade, onDelete: SetNull)
   userId String?
 
-  // The team member the note is about (workspace-scoped identity)
   teamMember   TeamMember @relation(fields: [teamMemberId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   teamMemberId String
 
-  // Workspace scoping — notes in Workspace A are invisible in Workspace B
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   organizationId String
 
-  // Indexes for foreign keys and common queries
   @@index([teamMemberId])
   @@index([userId])
   @@index([organizationId])
@@ -1688,7 +1569,6 @@ model AuditImage {
   auditSession   AuditSession @relation(fields: [auditSessionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   auditSessionId String
 
-  // Optional link to specific asset within the audit
   auditAsset   AuditAsset? @relation(fields: [auditAssetId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   auditAssetId String?
 
@@ -1702,7 +1582,6 @@ model AuditImage {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Indexes for performance
   @@index([auditSessionId])
   @@index([auditAssetId])
   @@index([organizationId])
@@ -1715,15 +1594,12 @@ model RoleChangeLog {
   newRole      OrganizationRoles
   createdAt    DateTime          @default(now())
 
-  // Who was changed
   user   User   @relation("roleChangeTarget", fields: [userId], references: [id])
   userId String
 
-  // Who performed the change
   changedBy   User   @relation("roleChangeActor", fields: [changedById], references: [id])
   changedById String
 
-  // Which organization
   organization   Organization @relation(fields: [organizationId], references: [id])
   organizationId String
 
@@ -1731,28 +1607,18 @@ model RoleChangeLog {
   @@index([organizationId, createdAt])
 }
 
-// Structured, append-only stream of state-change events.
-// Written in parallel with the legacy system-notes (`type = UPDATE`) so the
-// existing activity-feed UI keeps working unchanged; reports read only from
-// this table. See `.claude/rules/use-record-event.md` for usage rules.
 model ActivityEvent {
   id             String   @id @default(cuid())
   organizationId String
-  occurredAt     DateTime @default(now()) @db.Timestamptz(3)
+  occurredAt     DateTime @default(now())
 
-  // Who
   actorUserId   String?
-  // Snapshot of the actor at write time — robust against user deletion / rename
-  // for historical reports. Shape: { firstName, lastName, displayName }.
   actorSnapshot Json?
 
-  // What
   action     ActivityAction
   entityType ActivityEntity
   entityId   String
 
-  // Sparse cross-refs — populate whichever apply to the event. Plain FKs (no
-  // relation blocks) keep this table independent of source-entity cascade rules.
   assetId        String?
   bookingId      String?
   auditSessionId String?
@@ -1762,18 +1628,14 @@ model ActivityEvent {
   teamMemberId   String?
   targetUserId   String?
 
-  // Typed field-change payload — used by `*_CHANGED` actions.
-  // One event per changed field; see `record-event-payload-shapes` rule.
   field     String?
   fromValue Json?
   toValue   Json?
 
-  // Action-specific extras (e.g. { isExpected } for AUDIT_ASSET_SCANNED).
   meta Json?
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
-  // Reports-oriented indexes. Kept tight; expand only when a real report needs it.
   @@index([organizationId, occurredAt])
   @@index([organizationId, action, occurredAt])
   @@index([organizationId, entityType, entityId, occurredAt])
@@ -1795,8 +1657,7 @@ enum ActivityEntity {
   ORGANIZATION
 }
 
-// Additive-only. Never rename or remove values — query compatibility depends
-// on historical events keeping their original action name.
+// Additive-only. Never rename or remove values.
 enum ActivityAction {
   // Asset
   ASSET_CREATED
@@ -1850,4 +1711,18 @@ enum ActivityAction {
   // Kit
   KIT_CREATED
   KIT_UPDATED
+}
+
+// Scheduled background jobs (replaces pg-boss)
+model ScheduledJob {
+  id        String   @id @default(cuid())
+  queue     String
+  payload   String   // JSON-encoded job data
+  executeAt DateTime
+  attempts  Int      @default(0)
+  state     String   @default("pending") // pending | completed | failed
+  createdAt DateTime @default(now())
+
+  @@index([queue, state, executeAt])
+  @@index([state, executeAt])
 }

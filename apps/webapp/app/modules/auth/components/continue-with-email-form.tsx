@@ -4,7 +4,9 @@ import { z } from "zod";
 import Input from "~/components/forms/input";
 import { Button } from "~/components/shared/button";
 
-import type { action } from "~/routes/_auth+/send-otp";
+// why: send-otp route does not exist in this self-hosted fork; use a generic
+// response type instead of importing from a missing module
+type SendOtpActionData = { error?: { message?: string } } | null;
 import { validEmail } from "~/utils/misc";
 import { tw } from "~/utils/tw";
 export const SendOtpSchema = z.object({
@@ -24,7 +26,7 @@ export const SendOtpSchema = z.object({
 });
 
 export function ContinueWithEmailForm({ mode }: { mode: "login" | "signup" }) {
-  const sendOTP = useFetcher<typeof action>();
+  const sendOTP = useFetcher<SendOtpActionData>();
   const { data, state } = sendOTP;
   const zo = useZorm("NewQuestionWizardScreen", SendOtpSchema);
 
@@ -49,7 +51,7 @@ export function ContinueWithEmailForm({ mode }: { mode: "login" | "signup" }) {
         disabled={isLoading}
         error={zo.errors.email()?.message || ""}
       />
-      {data?.error.message ? (
+      {data?.error?.message ? (
         <div className={tw(` text-red-600`)}>{data.error.message}</div>
       ) : null}
       <Button

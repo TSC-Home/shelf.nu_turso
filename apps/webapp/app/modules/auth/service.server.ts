@@ -1,36 +1,101 @@
-import {
-  AuthError,
-  isAuthApiError,
-  isAuthRetryableFetchError,
-} from "@supabase/supabase-js";
+/**
+ * Custom Authentication Service
+ *
+ * Replaces the Supabase auth integration with a self-hosted solution:
+ * - Passwords hashed with bcryptjs (stored in UserPassword table)
+ * - Short-lived JWT access tokens (1 hour, signed with SESSION_SECRET)
+ * - Long-lived refresh tokens (30 days, stored in UserSession table)
+ *
+ * @see {@link file://../../server/middleware.ts} - protect() and refreshSession()
+ * @see {@link file://../../server/session.ts} - AuthSession cookie shape
+ */
+import { randomBytes } from "node:crypto";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
 import type { AuthSession } from "@server/session";
-import { config } from "~/config/shelf.config";
 import { db } from "~/database/db.server";
-import { getSupabaseAdmin } from "~/integrations/supabase/client";
-import { SERVER_URL } from "~/utils/env";
-
+import { triggerEmail } from "~/emails/email.worker.server";
+import { SERVER_URL, SESSION_SECRET } from "~/utils/env";
 import type { ErrorLabel } from "~/utils/error";
-import { isLikeShelfError, ShelfError } from "~/utils/error";
+import { ShelfError } from "~/utils/error";
 import { Logger } from "~/utils/logger";
-import { mapAuthSession } from "./mappers.server";
 
 const label: ErrorLabel = "Auth";
 
+/** Access token lifetime in seconds (1 hour) */
+const ACCESS_TOKEN_TTL = 60 * 60;
+/** Refresh token lifetime in milliseconds (30 days) */
+const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/** bcrypt work factor */
+const SALT_ROUNDS = 10;
+
+type JwtPayload = { userId: string; email: string };
+
+/** Signs a short-lived JWT access token. */
+function signAccessToken(userId: string, email: string): string {
+  return jwt.sign({ userId, email } satisfies JwtPayload, SESSION_SECRET, {
+    expiresIn: ACCESS_TOKEN_TTL,
+  });
+}
+
+/** Verifies and decodes an access token. Returns null on failure. */
+function verifyAccessToken(token: string): JwtPayload | null {
+  try {
+    return jwt.verify(token, SESSION_SECRET) as JwtPayload;
+  } catch {
+    return null;
+  }
+}
+
+/** Generates a cryptographically random refresh token string. */
+function generateRefreshToken(): string {
+  return randomBytes(32).toString("hex");
+}
+
+/** Builds an AuthSession from a user + a freshly created UserSession row. */
+function buildAuthSession(
+  userId: string,
+  email: string,
+  refreshToken: string
+): AuthSession {
+  const accessToken = signAccessToken(userId, email);
+  const decoded = jwt.decode(accessToken) as { exp: number };
+  const expiresAt = decoded.exp;
+  return {
+    accessToken,
+    refreshToken,
+    userId,
+    email,
+    expiresIn: ACCESS_TOKEN_TTL,
+    expiresAt,
+  };
+}
+
+/** Creates a UserPassword record for a new user. */
 export async function createEmailAuthAccount(email: string, password: string) {
   try {
-    const { data, error } = await getSupabaseAdmin().auth.admin.createUser({
-      email,
-      password,
-      email_confirm: true,
+    const user = await db.user.findUnique({
+      where: { email: email.toLowerCase() },
+      select: { id: true, email: true },
     });
 
-    if (error) {
-      throw error;
+    if (!user) {
+      throw new ShelfError({
+        cause: null,
+        message: "User not found — create the User record first",
+        additionalData: { email },
+        label,
+      });
     }
 
-    const { user } = data;
+    const hash = await bcrypt.hash(password, SALT_ROUNDS);
+    await db.userPassword.upsert({
+      where: { userId: user.id },
+      create: { userId: user.id, hash },
+      update: { hash },
+    });
 
-    return user;
+    return { id: user.id, email: user.email };
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -42,44 +107,29 @@ export async function createEmailAuthAccount(email: string, password: string) {
 }
 
 /**
- * Looks up an existing Supabase auth account by email and confirms it.
- *
- * Used as a fallback during invite acceptance when `createEmailAuthAccount`
- * fails because the email already exists in Supabase (e.g. user signed up
- * but never confirmed their email). The invite JWT serves as proof of email
- * ownership, making direct confirmation safe.
- *
- * @returns The confirmed auth user, or `null` if no auth account exists
- *          for the given email.
+ * Looks up an existing user account by email and (re-)sets their password.
+ * Used as a fallback during invite acceptance.
  */
 export async function confirmExistingAuthAccount(
   email: string,
   password: string
 ) {
   try {
-    const result = await db.$queryRaw<{ id: string }[]>`
-      SELECT id FROM auth.users
-      WHERE email = ${email.toLowerCase()}
-      LIMIT 1
-    `;
+    const user = await db.user.findUnique({
+      where: { email: email.toLowerCase() },
+      select: { id: true, email: true },
+    });
 
-    if (result.length === 0) {
-      return null;
-    }
+    if (!user) return null;
 
-    const { data, error } = await getSupabaseAdmin().auth.admin.updateUserById(
-      result[0].id,
-      {
-        email_confirm: true,
-        password,
-      }
-    );
+    const hash = await bcrypt.hash(password, SALT_ROUNDS);
+    await db.userPassword.upsert({
+      where: { userId: user.id },
+      create: { userId: user.id, hash },
+      update: { hash },
+    });
 
-    if (error) {
-      throw error;
-    }
-
-    return data.user;
+    return { id: user.id, email: user.email };
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -90,258 +140,90 @@ export async function confirmExistingAuthAccount(
   }
 }
 
-export async function signUpWithEmailPass(email: string, password: string) {
+/** Alias kept for call-site compatibility. */
+export const signUpWithEmailPass = createEmailAuthAccount;
+
+/** Signs in a user with email + password. Returns AuthSession or null if credentials are wrong. */
+export async function signInWithEmail(
+  email: string,
+  password: string
+): Promise<AuthSession | null> {
   try {
-    const { data, error } = await getSupabaseAdmin().auth.signUp({
-      email: email,
-      password: password,
-      options: {
-        data: {
-          signup_method: "email-password",
-        },
-      },
+    const user = await db.user.findUnique({
+      where: { email: email.toLowerCase() },
+      select: { id: true, email: true, password: true },
     });
 
-    if (error) {
-      throw error;
-    }
-
-    const { user } = data;
-
-    if (!user) {
-      throw new ShelfError({
-        cause: null,
-        message: "The user returned by Supabase is null",
-        label,
-      });
-    }
-
-    return user;
-  } catch (cause) {
-    const isRateLimitError =
-      isAuthApiError(cause) &&
-      (cause.status === 429 ||
-        cause.message.includes("request this after 5 seconds"));
-    const isTransientFetchError = isAuthRetryableFetchError(cause);
-    /** Supabase can return transient database errors during user creation
-     * that resolve on retry — suppress these from Sentry. */
-    const isDatabaseError =
-      isAuthApiError(cause) && cause.message.includes("Database error");
-    const message = isRateLimitError
-      ? "You're trying too fast. Please wait a few seconds and try again."
-      : "Something went wrong, refresh page and try to signup again.";
-    throw new ShelfError({
-      cause,
-      message,
-      additionalData: { email },
-      label,
-      shouldBeCaptured: !(
-        isRateLimitError ||
-        isTransientFetchError ||
-        isDatabaseError
-      ),
-    });
-  }
-}
-
-export async function resendVerificationEmail(email: string) {
-  try {
-    const { error } = await getSupabaseAdmin().auth.resend({
-      type: "signup",
-      email,
-    });
-
-    if (error) {
-      throw error;
-    }
-  } catch (cause) {
-    // @ts-expect-error
-    const isRateLimitError = cause?.code === "over_email_send_rate_limit";
-    throw new ShelfError({
-      cause,
-      message:
-        "Something went wrong while resending the verification email. Please try again later or contact support.",
-      additionalData: { email },
-      label,
-      shouldBeCaptured: !isRateLimitError,
-    });
-  }
-}
-
-export async function signInWithEmail(email: string, password: string) {
-  try {
-    const { data, error } = await getSupabaseAdmin().auth.signInWithPassword({
-      email,
-      password,
-    });
-
-    if (error?.message === "Email not confirmed") {
+    if (!user?.password) {
       return null;
     }
 
-    if (error) {
-      throw error;
+    const valid = await bcrypt.compare(password, user.password.hash);
+    if (!valid) {
+      throw new ShelfError({
+        cause: null,
+        message: "Incorrect email or password",
+        label,
+        shouldBeCaptured: false,
+      });
     }
 
-    const { session } = data;
-
-    return mapAuthSession(session);
-  } catch (cause) {
-    const isInvalidCredentials =
-      isAuthApiError(cause) && cause.message === "Invalid login credentials";
-    // Supabase 504s and intermittent fetch failures surface as
-    // `AuthRetryableFetchError`. They resolve on retry and shouldn't page us.
-    const isTransientFetchError = isAuthRetryableFetchError(cause);
-    // "Database error finding user" / similar transient backend hiccups.
-    const isDatabaseError =
-      isAuthApiError(cause) && cause.message.includes("Database error");
-    const isRateLimitError = isAuthApiError(cause) && cause.status === 429;
-
-    const message = isInvalidCredentials
-      ? "Incorrect email or password"
-      : "Something went wrong. Please try again later or contact support.";
-
-    throw new ShelfError({
-      cause,
-      message,
-      label,
-      shouldBeCaptured: !(
-        isInvalidCredentials ||
-        isTransientFetchError ||
-        isDatabaseError ||
-        isRateLimitError
-      ),
-    });
-  }
-}
-
-export async function signInWithSSO(domain: string) {
-  try {
-    const { data, error } = await getSupabaseAdmin().auth.signInWithSSO({
-      domain,
-      options: {
-        redirectTo: `${SERVER_URL}/oauth/callback`,
+    const refreshToken = generateRefreshToken();
+    await db.userSession.create({
+      data: {
+        userId: user.id,
+        refreshToken,
+        expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
       },
     });
 
-    if (error) {
-      throw error;
-    }
-
-    return data.url;
+    return buildAuthSession(user.id, user.email, refreshToken);
   } catch (cause) {
-    let message =
-      "Something went wrong. Please try again later or contact support.";
-    let shouldBeCaptured = true;
-
-    // @ts-expect-error
-    if (cause?.code === "sso_provider_not_found") {
-      message = "No SSO provider assigned for your organization's domain";
-      shouldBeCaptured = false;
-    }
-
     throw new ShelfError({
       cause,
-      message,
+      message:
+        cause instanceof ShelfError
+          ? cause.message
+          : "Something went wrong. Please try again later or contact support.",
       label,
-      shouldBeCaptured,
-      additionalData: { domain },
+      shouldBeCaptured: !(cause instanceof ShelfError),
     });
   }
 }
 
 /**
- * Helper function to check if user is SSO-only and throw appropriate error
- * @param email User's email address
- * @throws ShelfError if user exists and is SSO-only
+ * Sends a password-reset link via email.
+ * The link contains a short-lived JWT (`purpose: 'reset'`) that the
+ * `/reset-password` route verifies before allowing the password change.
  */
-async function validateNonSSOUser(email: string) {
-  const user = await db.user.findUnique({
-    where: { email: email.toLowerCase() },
-    select: { sso: true },
-  });
-
-  if (user?.sso) {
-    throw new ShelfError({
-      cause: null,
-      title: "SSO User",
-      message:
-        "This email address is associated with an SSO account. Please use SSO login instead.",
-      additionalData: { email },
-      label: "Auth",
-      shouldBeCaptured: false,
-    });
-  }
-}
-
-export async function sendOTP(email: string) {
-  try {
-    await validateNonSSOUser(email);
-
-    const { error } = await getSupabaseAdmin().auth.signInWithOtp({
-      email,
-      options: {
-        shouldCreateUser: !config.disableSignup, // If signup is disabled, don't create a new user
-      },
-    });
-
-    if (error) {
-      throw error;
-    }
-  } catch (cause) {
-    // Read `code` via narrowing instead of `@ts-expect-error` — `cause` is
-    // `unknown`, and a bare property access would throw at runtime if it
-    // were null/undefined.
-    const errorCode =
-      typeof cause === "object" && cause !== null && "code" in cause
-        ? (cause as { code: unknown }).code
-        : undefined;
-    // Match `signInWithEmail`'s rate-limit handling: cover both the
-    // Supabase OTP-specific `over_email_send_rate_limit` code and the
-    // generic HTTP 429 `AuthApiError` (which can carry a different code).
-    const isRateLimitError =
-      errorCode === "over_email_send_rate_limit" ||
-      (isAuthApiError(cause) && cause.status === 429);
-    // Supabase 504s and intermittent fetch failures resolve on retry.
-    const isTransientFetchError = isAuthRetryableFetchError(cause);
-    // "Database error finding user" — Supabase backend hiccup, not actionable.
-    const isDatabaseError =
-      isAuthApiError(cause) && cause.message.includes("Database error");
-    // SSO-mismatch / similar `validateNonSSOUser` rejections already opt out
-    // via their own `shouldBeCaptured: false` — preserve that decision.
-    const inheritedShouldBeCaptured = isLikeShelfError(cause)
-      ? cause.shouldBeCaptured
-      : undefined;
-
-    const fallbackMessage =
-      "Something went wrong while sending the OTP. Please try again later or contact support.";
-
-    // AuthRetryableFetchError (e.g. from 504 timeout) can have "{}" as message,
-    // so we validate the message is actually useful before showing it to users
-    const hasUsableMessage =
-      (cause instanceof AuthError || isLikeShelfError(cause)) &&
-      cause.message &&
-      cause.message !== "{}" &&
-      !cause.message.startsWith("{");
-
-    throw new ShelfError({
-      cause,
-      message: hasUsableMessage ? cause.message : fallbackMessage,
-      additionalData: { email },
-      label,
-      shouldBeCaptured:
-        inheritedShouldBeCaptured === false
-          ? false
-          : !(isRateLimitError || isTransientFetchError || isDatabaseError),
-    });
-  }
-}
-
 export async function sendResetPasswordLink(email: string) {
   try {
-    await validateNonSSOUser(email);
+    const user = await db.user.findUnique({
+      where: { email: email.toLowerCase() },
+      select: { id: true, email: true, firstName: true },
+    });
 
-    await getSupabaseAdmin().auth.resetPasswordForEmail(email);
+    // Silently succeed even if the email doesn't exist to avoid user enumeration
+    if (!user) return;
+
+    const resetToken = jwt.sign(
+      { userId: user.id, email: user.email, purpose: "reset" },
+      SESSION_SECRET,
+      { expiresIn: "15m" }
+    );
+
+    const resetUrl = `${SERVER_URL}/reset-password?token=${resetToken}`;
+
+    await triggerEmail({
+      to: user.email,
+      subject: "Reset your Shelf password",
+      text: `Hi ${
+        user.firstName ?? ""
+      },\n\nClick the link below to reset your password. The link expires in 15 minutes.\n\n${resetUrl}\n\nIf you did not request this, you can ignore this email.\n\n— The Shelf Team`,
+      html: `<p>Hi ${
+        user.firstName ?? ""
+      },</p><p>Click the link below to reset your password. The link expires in 15 minutes.</p><p><a href="${resetUrl}">${resetUrl}</a></p><p>If you did not request this, you can ignore this email.</p><p>— The Shelf Team</p>`,
+    });
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -353,36 +235,42 @@ export async function sendResetPasswordLink(email: string) {
   }
 }
 
+/**
+ * Verifies a password-reset token and returns the userId if valid.
+ * Returns null if the token is expired, invalid, or has the wrong purpose.
+ */
+export function verifyResetToken(
+  token: string
+): { userId: string; email: string } | null {
+  try {
+    const payload = jwt.verify(token, SESSION_SECRET) as {
+      userId: string;
+      email: string;
+      purpose: string;
+    };
+    if (payload.purpose !== "reset") return null;
+    return { userId: payload.userId, email: payload.email };
+  } catch {
+    return null;
+  }
+}
+
+/** Updates the password for a user. Optionally invalidates all other sessions. */
 export async function updateAccountPassword(
   id: string,
   password: string,
-  accessToken?: string | undefined
+  invalidateOtherSessions?: boolean
 ) {
   try {
-    const user = await db.user.findFirst({
-      where: { id },
-      select: {
-        sso: true,
-      },
-    });
-    if (user?.sso) {
-      throw new ShelfError({
-        cause: null,
-        message: "You cannot update the password of an SSO user.",
-        label,
-      });
-    }
-    //logout all the others session expect the current sesssion.
-    if (accessToken) {
-      await getSupabaseAdmin().auth.admin.signOut(accessToken, "others");
-    }
-    //on password update, it is remvoing the session in th supbase.
-    const { error } = await getSupabaseAdmin().auth.admin.updateUserById(id, {
-      password,
+    const hash = await bcrypt.hash(password, SALT_ROUNDS);
+    await db.userPassword.upsert({
+      where: { userId: id },
+      create: { userId: id, hash },
+      update: { hash },
     });
 
-    if (error) {
-      throw error;
+    if (invalidateOtherSessions) {
+      await db.userSession.deleteMany({ where: { userId: id } });
     }
   } catch (cause) {
     throw new ShelfError({
@@ -395,19 +283,16 @@ export async function updateAccountPassword(
   }
 }
 
+/** Deletes auth credentials for a user (password + all sessions). */
 export async function deleteAuthAccount(userId: string) {
   try {
-    const { error } = await getSupabaseAdmin().auth.admin.deleteUser(userId);
-
-    if (error) {
-      throw error;
-    }
+    await db.userPassword.deleteMany({ where: { userId } });
+    await db.userSession.deleteMany({ where: { userId } });
   } catch (cause) {
     Logger.error(
       new ShelfError({
         cause,
-        message:
-          "Something went wrong while deleting the auth account. Please manually delete the user account in the Supabase dashboard.",
+        message: "Something went wrong while deleting the auth account.",
         additionalData: { userId },
         label,
       })
@@ -415,18 +300,18 @@ export async function deleteAuthAccount(userId: string) {
   }
 }
 
+/** Looks up a user by ID. Mirrors Supabase's getAuthUserById shape. */
 export async function getAuthUserById(userId: string) {
   try {
-    const { data, error } =
-      await getSupabaseAdmin().auth.admin.getUserById(userId);
-
-    if (error) {
-      throw error;
-    }
-
-    const { user } = data;
-
-    return user;
+    const user = await db.user.findUnique({
+      where: { id: userId },
+      select: { id: true, email: true },
+    });
+    // Attach user_metadata shape expected by onboarding (was a Supabase field).
+    // All accounts in this fork use email-password auth.
+    return user
+      ? { ...user, user_metadata: { signup_method: "email-password" } }
+      : null;
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -438,50 +323,37 @@ export async function getAuthUserById(userId: string) {
   }
 }
 
-export async function getAuthResponseByAccessToken(accessToken: string) {
+/**
+ * Validates that a refresh token exists and has not expired.
+ * Used by the `protect()` middleware on every request.
+ */
+export async function validateSession(token: string): Promise<boolean> {
   try {
-    return await getSupabaseAdmin().auth.getUser(accessToken);
-  } catch (cause) {
-    throw new ShelfError({
-      cause,
-      message:
-        "Something went wrong while getting the auth response by access token. Please try again later or contact support.",
-      label,
+    const session = await db.userSession.findFirst({
+      where: {
+        refreshToken: token,
+        expiresAt: { gt: new Date() },
+      },
+      select: { id: true },
     });
-  }
-}
 
-export async function validateSession(token: string) {
-  try {
-    // const t0 = performance.now();
-    const result = await db.$queryRaw<{ id: string; revoked: boolean }[]>`
-      SELECT id, revoked FROM auth.refresh_tokens 
-      WHERE token = ${token} 
-      AND revoked = false
-      LIMIT 1 
-    `;
-    // const t1 = performance.now();
-
-    // eslint-disable-next-line no-console
-    // console.log(`Call to validateSession took ${t1 - t0} milliseconds.`);
-
-    if (result.length === 0) {
-      //logging for debug
+    if (!session) {
       Logger.error(
         new ShelfError({
           cause: null,
-          message: "Refresh token is invalid or has been revoked",
+          message: "Refresh token is invalid or has expired",
           label,
           shouldBeCaptured: false,
         })
       );
     }
-    return result.length > 0;
-  } catch (_err) {
+
+    return session !== null;
+  } catch {
     Logger.error(
       new ShelfError({
         cause: null,
-        message: "Something went wrong while valdiating the session",
+        message: "Something went wrong while validating the session",
         label,
         shouldBeCaptured: false,
       })
@@ -490,6 +362,10 @@ export async function validateSession(token: string) {
   }
 }
 
+/**
+ * Rotates the refresh token and issues a new access token.
+ * Called by `refreshSession()` middleware when the access token is near expiry.
+ */
 export async function refreshAccessToken(
   refreshToken?: string
 ): Promise<AuthSession> {
@@ -502,45 +378,71 @@ export async function refreshAccessToken(
       });
     }
 
-    const { data, error } = await getSupabaseAdmin().auth.refreshSession({
-      refresh_token: refreshToken,
+    const existing = await db.userSession.findFirst({
+      where: {
+        refreshToken,
+        expiresAt: { gt: new Date() },
+      },
+      select: { userId: true, user: { select: { email: true } } },
     });
 
-    if (error) {
-      throw error;
-    }
-
-    const { session } = data;
-
-    if (!session) {
+    if (!existing) {
       throw new ShelfError({
         cause: null,
-        message: "The session returned by Supabase is null",
+        message: "Refresh token is invalid or has expired",
         label,
+        shouldBeCaptured: false,
       });
     }
 
-    return mapAuthSession(session);
+    // Rotate: delete old session, create new one
+    const newRefreshToken = generateRefreshToken();
+    await db.userSession.deleteMany({ where: { refreshToken } });
+    await db.userSession.create({
+      data: {
+        userId: existing.userId,
+        refreshToken: newRefreshToken,
+        expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
+      },
+    });
+
+    return buildAuthSession(
+      existing.userId,
+      existing.user.email,
+      newRefreshToken
+    );
   } catch (cause) {
     throw new ShelfError({
       cause,
       message:
         "Unable to refresh access token. Please try again. If the issue persists, contact support",
       label,
-      additionalData: {
-        refreshToken,
-      },
+      additionalData: { refreshToken },
     });
   }
 }
 
-export async function verifyAuthSession(authSession: AuthSession) {
+/**
+ * Verifies that the access token in the session is still valid.
+ * Used when a strict check is needed (e.g., password-change flows).
+ */
+export async function verifyAuthSession(
+  authSession: AuthSession
+): Promise<boolean> {
   try {
-    const authAccount = await getAuthResponseByAccessToken(
-      authSession.accessToken
-    );
+    const payload = verifyAccessToken(authSession.accessToken);
+    if (!payload) return false;
 
-    return Boolean(authAccount);
+    const session = await db.userSession.findFirst({
+      where: {
+        refreshToken: authSession.refreshToken,
+        userId: authSession.userId,
+        expiresAt: { gt: new Date() },
+      },
+      select: { id: true },
+    });
+
+    return session !== null;
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -551,45 +453,10 @@ export async function verifyAuthSession(authSession: AuthSession) {
   }
 }
 
-export async function verifyOtpAndSignin(email: string, otp: string) {
-  try {
-    const { data, error } = await getSupabaseAdmin().auth.verifyOtp({
-      email,
-      token: otp,
-      type: "email",
-    });
-
-    if (error) {
-      throw error;
-    }
-
-    const { session } = data;
-
-    if (!session) {
-      throw new ShelfError({
-        cause: null,
-        message: "The session returned by Supabase is null",
-        label,
-      });
-    }
-
-    return mapAuthSession(session);
-  } catch (cause) {
-    let message =
-      "Something went wrong. Please try again later or contact support.";
-    let shouldBeCaptured = true;
-
-    if (isAuthApiError(cause) && cause.message !== "") {
-      message = cause.message;
-      shouldBeCaptured = false;
-    }
-
-    throw new ShelfError({
-      cause,
-      message,
-      label,
-      shouldBeCaptured,
-      additionalData: { email },
-    });
-  }
+/**
+ * Validates a JWT access token from a mobile API `Authorization: Bearer` header.
+ * Returns the decoded payload or null if the token is invalid/expired.
+ */
+export function verifyMobileAccessToken(token: string): JwtPayload | null {
+  return verifyAccessToken(token);
 }

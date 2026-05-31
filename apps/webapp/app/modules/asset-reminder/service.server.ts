@@ -168,8 +168,8 @@ export async function getPaginatedAndFilterableReminders({
 
       finalWhere.OR = searchTerms.map((term) => ({
         OR: [
-          { name: { contains: term, mode: "insensitive" } },
-          { message: { contains: term, mode: "insensitive" } },
+          { name: { contains: term } },
+          { message: { contains: term } },
           {
             teamMembers: {
               some: {
@@ -178,13 +178,11 @@ export async function getPaginatedAndFilterableReminders({
                     {
                       firstName: {
                         contains: term,
-                        mode: "insensitive",
                       },
                     },
                     {
                       lastName: {
                         contains: term,
-                        mode: "insensitive",
                       },
                     },
                   ],
@@ -193,7 +191,7 @@ export async function getPaginatedAndFilterableReminders({
             },
           },
           {
-            asset: { title: { contains: term, mode: "insensitive" } },
+            asset: { title: { contains: term } },
           },
         ],
       }));

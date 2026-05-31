@@ -16,8 +16,11 @@ import { config } from "~/config/shelf.config";
 import { useSearchParams } from "~/hooks/search-params";
 import { useAutoFocus } from "~/hooks/use-auto-focus";
 import { ContinueWithEmailForm } from "~/modules/auth/components/continue-with-email-form";
-import { signUpWithEmailPass } from "~/modules/auth/service.server";
-import { findUserByEmail } from "~/modules/user/service.server";
+import {
+  createEmailAuthAccount,
+  signInWithEmail,
+} from "~/modules/auth/service.server";
+import { createUser, findUserByEmail } from "~/modules/user/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import {
   ShelfError,
@@ -32,8 +35,10 @@ import {
   getActionMethod,
   parseData,
 } from "~/utils/http.server";
+import { id as generateId } from "~/utils/id/id.server";
 import { validEmail } from "~/utils/misc";
 import { validateNonSSOSignup } from "~/utils/sso.server";
+import { randomUsernameFromEmail } from "~/utils/user";
 
 export function loader({ context }: LoaderFunctionArgs) {
   const title = "Create an account";
@@ -89,7 +94,7 @@ const JoinFormSchema = z
     }
   });
 
-export async function action({ request }: ActionFunctionArgs) {
+export async function action({ request, context }: ActionFunctionArgs) {
   try {
     const method = getActionMethod(request);
 
@@ -118,12 +123,27 @@ export async function action({ request }: ActionFunctionArgs) {
           });
         }
 
-        // Sign up with the provided email and password
-        await signUpWithEmailPass(email, password);
+        // Create User DB record + personal org, then password, then sign in.
+        // (No OTP/email-verification step in this self-hosted fork.)
+        const userId = generateId();
+        const username = randomUsernameFromEmail(email);
 
-        return redirect(
-          `/otp?email=${encodeURIComponent(email)}&mode=confirm_signup`
-        );
+        await createUser({ userId, email, username });
+        await createEmailAuthAccount(email, password);
+
+        const authSession = await signInWithEmail(email, password);
+        if (!authSession) {
+          throw new ShelfError({
+            cause: null,
+            message:
+              "Account created but sign-in failed. Please try logging in.",
+            label: "User onboarding",
+            shouldBeCaptured: true,
+          });
+        }
+
+        context.setSession(authSession);
+        return redirect("/welcome/onboarding");
       }
     }
 

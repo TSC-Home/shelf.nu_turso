@@ -135,21 +135,10 @@ export async function resolveAssetIdsForBulkOperation({
     return assetIds;
   }
 
-  // Case 2: Select all - use mode from settings
-  // IMPORTANT: We must respect settings.mode as the source of truth
-  // If someone has advanced syntax in URL but settings say SIMPLE,
-  // we ignore the advanced filters (they may be from old bookmark/shared link)
-  const isAdvancedMode = settings.mode === "ADVANCED";
-
-  if (isAdvancedMode && currentSearchParams) {
-    // ADVANCED MODE: Use dedicated function for advanced filters
-    return getAdvancedFilteredAssetIds({
-      organizationId,
-      filters: currentSearchParams,
-      settings,
-      availableToBookOnly: false, // Set based on user role if needed
-    });
-  } else {
+  // Case 2: Select all - always use SIMPLE mode.
+  // ADVANCED mode uses PostgreSQL-specific raw SQL (public.* schema prefix,
+  // ILIKE, ::type casts, jsonb_agg) incompatible with SQLite/libSQL.
+  {
     // SIMPLE MODE: Use simple where clause
     // Note: getAssetsWhereInput will safely ignore any advanced filter syntax
     const where = getAssetsWhereInput({

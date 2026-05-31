@@ -33,7 +33,7 @@ const addToQueue = async (payload: EmailPayloadType) => {
   };
 
   try {
-    await scheduler.send(QueueNames.emailQueue, payload, options);
+    await scheduler.send(QueueNames.emailQueue, payload);
   } catch (cause) {
     Logger.error(
       new ShelfError({

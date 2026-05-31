@@ -49,7 +49,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       organizationId,
       ...(search
         ? {
-            title: { contains: search, mode: "insensitive" as const },
+            title: { contains: search },
           }
         : {}),
       ...(myCustody

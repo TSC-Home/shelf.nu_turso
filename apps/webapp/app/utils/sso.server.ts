@@ -1,10 +1,7 @@
 import type { Organization, SsoDetails } from "@prisma/client";
 import type { AuthSession } from "@server/session";
 import { db } from "~/database/db.server";
-import {
-  deleteAuthAccount,
-  getAuthUserById,
-} from "~/modules/auth/service.server";
+import { deleteAuthAccount } from "~/modules/auth/service.server";
 import {
   emailMatchesDomains,
   parseDomains,
@@ -14,7 +11,6 @@ import {
   createUserFromSSO,
   updateUserFromSSO,
 } from "~/modules/user/service.server";
-import { DISABLE_SSO } from "./env";
 import { isLikeShelfError, ShelfError } from "./error";
 import { isValidDomain } from "./misc";
 
@@ -73,18 +69,6 @@ export async function resolveUserAndOrgForSsoCallback({
 
     // If user exists, check if they're trying to convert from email to SSO
     if (user) {
-      const authUser = await getAuthUserById(user.id);
-      if (authUser?.app_metadata?.provider === "email") {
-        throw new ShelfError({
-          cause: null,
-          title: "User already exists",
-          message:
-            "It looks like the email you're using is linked to a personal account in Shelf. Please contact our support team to update your personal workspace to a different email account.",
-          label: "Auth",
-          shouldBeCaptured: false,
-        });
-      }
-
       // Existing SSO user - update their info
       const response = await updateUserFromSSO(authSession, user, {
         firstName,
@@ -169,63 +153,14 @@ export async function getConfiguredSSODomains(): Promise<SSODomainConfig[]> {
  * @param email - Email to check domain for
  */
 export async function checkDomainSSOStatus(
-  email: string
+  _email: string
 ): Promise<DomainCheckResult> {
-  try {
-    const domain = email.split("@")[1]?.toLowerCase();
-
-    // Check all SSO providers configured for this domain
-    const ssoConfigs = await db.$queryRaw<{ ssoProviderId: string }[]>`
-      SELECT sso_provider_id::text as "ssoProviderId"
-      FROM auth.sso_domains
-      WHERE lower(domain) = ${domain}
-    `;
-
-    if (ssoConfigs.length === 0) {
-      return {
-        isConfiguredForSSO: false,
-        linkedOrganization: null,
-        ssoProviderId: null,
-      };
-    }
-
-    // Get all SSO provider IDs for this domain
-    const ssoProviderIds = ssoConfigs.map((config) => config.ssoProviderId);
-
-    // Find organization where this domain is included in their comma-separated domains
-    const linkedOrg = await db.organization.findFirst({
-      where: {
-        ssoDetails: {
-          domain: {
-            contains: domain,
-          },
-        },
-      },
-      include: {
-        ssoDetails: true,
-      },
-    });
-
-    // If we found an org, verify the domain is actually in their list
-    const isValidDomain = linkedOrg?.ssoDetails
-      ? emailMatchesDomains(email, linkedOrg.ssoDetails.domain)
-      : false;
-
-    // Return the first SSO provider ID if we found multiple
-    // This maintains backward compatibility while we handle multiple domains
-    return {
-      isConfiguredForSSO: true,
-      linkedOrganization: isValidDomain ? linkedOrg : null,
-      ssoProviderId: ssoProviderIds[0] || null,
-    };
-  } catch (cause) {
-    throw new ShelfError({
-      cause,
-      message: "Failed to check domain SSO status",
-      additionalData: { email },
-      label: "SSO",
-    });
-  }
+  // SSO is not available in this self-hosted SQLite fork — no auth.sso_domains table exists.
+  return Promise.resolve({
+    isConfiguredForSSO: false,
+    linkedOrganization: null,
+    ssoProviderId: null,
+  });
 }
 
 /**
@@ -255,8 +190,7 @@ export async function doesSSOUserExist(email: string): Promise<boolean> {
  * @throws ShelfError if signup is not allowed due to SSO configuration
  */
 export async function validateNonSSOSignup(email: string): Promise<void> {
-  /** Quick return if SSO is disabled as this check is then unnecessary */
-  if (DISABLE_SSO) return;
+  /** SSO domain check — skipped when SSO is disabled */
   const domainStatus = await checkDomainSSOStatus(email);
 
   if (domainStatus.isConfiguredForSSO) {

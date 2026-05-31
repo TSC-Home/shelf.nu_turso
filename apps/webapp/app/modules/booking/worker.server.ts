@@ -1,6 +1,6 @@
 /* eslint-disable no-console */
 import { BookingStatus } from "@prisma/client";
-import type PgBoss from "pg-boss";
+
 import { db } from "~/database/db.server";
 import { bookingUpdatesTemplateString } from "~/emails/bookings-updates-template";
 import { sendEmail } from "~/emails/mail.server";
@@ -27,7 +27,12 @@ import {
 import type { SchedulerData } from "./types";
 import { createSystemBookingNote } from "../booking-note/service.server";
 
-const checkoutReminder = async ({ data }: PgBoss.Job<SchedulerData>) => {
+const checkoutReminder = async ({
+  data,
+}: {
+  data: SchedulerData;
+  id: string;
+}) => {
   const booking = await db.booking
     .findFirstOrThrow({
       // eslint-disable-next-line local-rules/require-org-scope-on-id-queries -- idor-safe: background pg-boss scheduler job keyed by bookingId from the queue payload (SchedulerData has no user org context); the booking record is the org scope and recipients are resolved from booking.organizationId
@@ -96,7 +101,12 @@ const checkoutReminder = async ({ data }: PgBoss.Job<SchedulerData>) => {
   }
 };
 
-const checkinReminder = async ({ data }: PgBoss.Job<SchedulerData>) => {
+const checkinReminder = async ({
+  data,
+}: {
+  data: SchedulerData;
+  id: string;
+}) => {
   const booking = await db.booking
     .findFirstOrThrow({
       // eslint-disable-next-line local-rules/require-org-scope-on-id-queries -- idor-safe: background pg-boss scheduler job keyed by bookingId from the queue payload (SchedulerData has no user org context); the booking record is the org scope and recipients are resolved from booking.organizationId
@@ -141,7 +151,12 @@ const checkinReminder = async ({ data }: PgBoss.Job<SchedulerData>) => {
   }
 };
 
-const overdueHandler = async ({ data }: PgBoss.Job<SchedulerData>) => {
+const overdueHandler = async ({
+  data,
+}: {
+  data: SchedulerData;
+  id: string;
+}) => {
   const booking = await db.booking
     .update({
       // eslint-disable-next-line local-rules/require-org-scope-on-id-queries -- idor-safe: background pg-boss scheduler job keyed by bookingId from the queue payload (SchedulerData has no user org context); transition is gated on current status and downstream notes/recipients use booking.organizationId
@@ -229,7 +244,12 @@ const overdueHandler = async ({ data }: PgBoss.Job<SchedulerData>) => {
   }
 };
 
-const autoArchiveHandler = async ({ data }: PgBoss.Job<SchedulerData>) => {
+const autoArchiveHandler = async ({
+  data,
+}: {
+  data: SchedulerData;
+  id: string;
+}) => {
   try {
     // Fetch the booking to check if it's still in COMPLETE status
     const booking = await db.booking.findUnique({
@@ -317,7 +337,7 @@ const autoArchiveHandler = async ({ data }: PgBoss.Job<SchedulerData>) => {
 
 const event2HandlerMap: Record<
   BOOKING_SCHEDULER_EVENTS_ENUM,
-  (job: PgBoss.Job<SchedulerData>) => Promise<void>
+  (job: { data: SchedulerData; id: string }) => Promise<void>
 > = {
   [BOOKING_SCHEDULER_EVENTS_ENUM.checkoutReminder]: checkoutReminder,
   [BOOKING_SCHEDULER_EVENTS_ENUM.checkinReminder]: checkinReminder,

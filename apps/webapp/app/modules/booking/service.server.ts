@@ -1,7 +1,6 @@
-import { BookingStatus, AssetStatus, KitStatus } from "@prisma/client";
+import { BookingStatus, AssetStatus, KitStatus, Prisma } from "@prisma/client";
 import type {
   Booking,
-  Prisma,
   Organization,
   Asset,
   Kit,
@@ -452,6 +451,8 @@ export async function createBooking({
       name: booking.name,
       from: booking.from,
       to: booking.to,
+      // SQLite schema: createdAt has no @default(now()) so must be supplied
+      createdAt: new Date(),
       description: booking.description,
       status: BookingStatus.DRAFT,
       creator: { connect: { id: booking.creatorId } },
@@ -1728,7 +1729,12 @@ export async function checkinBooking({
       if (!partiallyCheckedInAssetsByBooking.has(checkin.bookingId)) {
         partiallyCheckedInAssetsByBooking.set(checkin.bookingId, new Set());
       }
-      checkin.assetIds.forEach((assetId) => {
+      // SQLite: assetIds is a JSON string — parse before iterating
+      const parsedAssetIds: string[] =
+        typeof checkin.assetIds === "string"
+          ? (JSON.parse(checkin.assetIds) as string[])
+          : (checkin.assetIds as unknown as string[]);
+      parsedAssetIds.forEach((assetId) => {
         partiallyCheckedInAssetsByBooking.get(checkin.bookingId)!.add(assetId);
       });
     });
@@ -2207,7 +2213,8 @@ export async function partialCheckinBooking({
         data: {
           bookingId: id,
           checkedInById: userId,
-          assetIds,
+          // SQLite: assetIds is stored as a JSON string
+          assetIds: JSON.stringify(assetIds),
           checkinCount: assetIds.length,
         },
       });
@@ -2438,13 +2445,21 @@ export async function updateBookingAssets({
         });
       }
 
+      // Build multi-row VALUES clause — SQLite-compatible replacement for
+      // PostgreSQL's `SELECT unnest(array)`.  ON CONFLICT DO NOTHING is
+      // supported by SQLite 3.24+ / libSQL.
+      const assetRows = Prisma.join(
+        validAssetIds.map((assetId) => Prisma.sql`(${assetId}, ${id})`),
+        ", "
+      );
+
       await Promise.all([
         // Bulk insert into the join table in a single SQL statement instead of
         // N individual connect operations which cause transaction timeouts
         // for large bookings
         tx.$executeRaw`
           INSERT INTO "_AssetToBooking" ("A", "B")
-          SELECT unnest(${validAssetIds}::text[]), ${id}
+          VALUES ${assetRows}
           ON CONFLICT ("A", "B") DO NOTHING
         `,
         // Touch updatedAt since the raw INSERT doesn't update the booking row
@@ -3336,22 +3351,22 @@ export async function getBookings(params: {
       where.OR = searchTerms.map((term) => ({
         OR: [
           // Search in booking fields
-          { name: { contains: term, mode: "insensitive" } },
-          { description: { contains: term, mode: "insensitive" } },
+          { name: { contains: term } },
+          { description: { contains: term } },
           // Search in tags
-          { tags: { some: { name: { contains: term, mode: "insensitive" } } } },
+          { tags: { some: { name: { contains: term } } } },
           // Search in custodian team member name
           {
             custodianTeamMember: {
-              name: { contains: term, mode: "insensitive" },
+              name: { contains: term },
             },
           },
           // Search in custodian user names
           {
             custodianUser: {
               OR: [
-                { firstName: { contains: term, mode: "insensitive" } },
-                { lastName: { contains: term, mode: "insensitive" } },
+                { firstName: { contains: term } },
+                { lastName: { contains: term } },
               ],
             },
           },
@@ -3360,15 +3375,15 @@ export async function getBookings(params: {
             assets: {
               some: {
                 OR: [
-                  { title: { contains: term, mode: "insensitive" } },
+                  { title: { contains: term } },
                   {
                     qrCodes: {
-                      some: { id: { contains: term, mode: "insensitive" } },
+                      some: { id: { contains: term } },
                     },
                   },
                   {
                     barcodes: {
-                      some: { value: { contains: term, mode: "insensitive" } },
+                      some: { value: { contains: term } },
                     },
                   },
                 ],
@@ -3867,7 +3882,6 @@ export async function getBooking<T extends Prisma.BookingInclude | undefined>(
     if (search) {
       assetsWhere.title = {
         contains: search,
-        mode: "insensitive",
       };
     }
 
@@ -5170,6 +5184,8 @@ export async function duplicateBooking({
         ).toJSDate(),
         organizationId,
         creatorId: userId,
+        // SQLite schema: createdAt has no @default(now()) so must be supplied
+        createdAt: new Date(),
         status: BookingStatus.DRAFT,
         custodianTeamMemberId: bookingToDuplicate.custodianTeamMemberId,
         custodianUserId: bookingToDuplicate.custodianUserId,
@@ -5306,7 +5322,12 @@ export async function getDetailedPartialCheckinData(bookingId: string) {
   const checkedInAssetIds: string[] = [];
 
   partialCheckins.forEach((checkin) => {
-    checkin.assetIds.forEach((assetId) => {
+    // SQLite: assetIds is a JSON string — parse before iterating
+    const parsedIds: string[] =
+      typeof checkin.assetIds === "string"
+        ? (JSON.parse(checkin.assetIds) as string[])
+        : (checkin.assetIds as unknown as string[]);
+    parsedIds.forEach((assetId) => {
       // Only store the first (earliest) check-in for each asset
       if (!assetCheckinRecord[assetId]) {
         assetCheckinRecord[assetId] = {
@@ -5414,7 +5435,8 @@ export async function getOngoingBookingForAsset({
         status: { in: [BookingStatus.ONGOING, BookingStatus.OVERDUE] },
         organizationId,
         assets: { some: { id: assetId } },
-        partialCheckins: { none: { assetIds: { has: assetId } } }, // Exclude bookings where this asset has been partially checked in
+        // SQLite: assetIds is a JSON string, use contains for membership check
+        partialCheckins: { none: { assetIds: { contains: `"${assetId}"` } } }, // Exclude bookings where this asset has been partially checked in
       },
     });
 

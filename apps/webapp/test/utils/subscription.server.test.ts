@@ -54,44 +54,28 @@ describe("canHideShelfBranding", () => {
   });
 });
 
+// barcodesEnabled / auditsEnabled removed from schema in self-hosted SQLite fork.
+// Both features are always enabled regardless of premium flag.
 describe("canUseBarcodes", () => {
-  it("returns true when premium disabled (regardless of barcodesEnabled)", async () => {
+  it("always returns true (field removed in self-hosted fork)", async () => {
     const { canUseBarcodes } = await loadSubscriptionModule(false);
-
-    expect(canUseBarcodes({ barcodesEnabled: false })).toBe(true);
-    expect(canUseBarcodes({ barcodesEnabled: true })).toBe(true);
+    expect(canUseBarcodes({})).toBe(true);
   });
 
-  it("returns true when premium enabled and barcodesEnabled is true", async () => {
+  it("always returns true even when premium enabled", async () => {
     const { canUseBarcodes } = await loadSubscriptionModule(true);
-
-    expect(canUseBarcodes({ barcodesEnabled: true })).toBe(true);
-  });
-
-  it("returns false when premium enabled and barcodesEnabled is false", async () => {
-    const { canUseBarcodes } = await loadSubscriptionModule(true);
-
-    expect(canUseBarcodes({ barcodesEnabled: false })).toBe(false);
+    expect(canUseBarcodes({})).toBe(true);
   });
 });
 
 describe("canUseAudits", () => {
-  it("returns true when premium disabled (regardless of auditsEnabled)", async () => {
+  it("always returns true (field removed in self-hosted fork)", async () => {
     const { canUseAudits } = await loadSubscriptionModule(false);
-
-    expect(canUseAudits({ auditsEnabled: false })).toBe(true);
-    expect(canUseAudits({ auditsEnabled: true })).toBe(true);
+    expect(canUseAudits({})).toBe(true);
   });
 
-  it("returns true when premium enabled and auditsEnabled is true", async () => {
+  it("always returns true even when premium enabled", async () => {
     const { canUseAudits } = await loadSubscriptionModule(true);
-
-    expect(canUseAudits({ auditsEnabled: true })).toBe(true);
-  });
-
-  it("returns false when premium enabled and auditsEnabled is false", async () => {
-    const { canUseAudits } = await loadSubscriptionModule(true);
-
-    expect(canUseAudits({ auditsEnabled: false })).toBe(false);
+    expect(canUseAudits({})).toBe(true);
   });
 });

@@ -3,6 +3,7 @@ import { data, type ActionFunctionArgs } from "react-router";
 import { db } from "~/database/db.server";
 import { getAssetsWhereInput } from "~/modules/asset/utils.server";
 import { generateQrObj } from "~/modules/qr/utils.server";
+import { resolveLabelBrandingText } from "~/utils/branding";
 import { makeShelfError, ShelfError } from "~/utils/error";
 import { payload, error } from "~/utils/http.server";
 import { ALL_SELECTED_KEY } from "~/utils/list";
@@ -26,6 +27,9 @@ export type BulkQrDownloadLoaderData = {
   }>;
   qrIdDisplayPreference: string;
   showShelfBranding: boolean;
+  labelBrandingText: string | null;
+  labelCustomText: string | null;
+  labelTemplate: "SQUARE" | "HORIZONTAL_50X30";
 };
 
 /**
@@ -101,6 +105,13 @@ export async function loader({ context, request }: ActionFunctionArgs) {
         assets: assetsWithQrObj,
         qrIdDisplayPreference: currentOrganization.qrIdDisplayPreference,
         showShelfBranding: currentOrganization.showShelfBranding,
+        labelBrandingText: resolveLabelBrandingText(
+          currentOrganization.labelBrandingText,
+          currentOrganization.showShelfBranding
+        ),
+        labelCustomText: currentOrganization.labelCustomText ?? null,
+        labelTemplate: (currentOrganization.labelTemplate ??
+          "SQUARE") as BulkQrDownloadLoaderData["labelTemplate"],
       })
     );
   } catch (cause) {

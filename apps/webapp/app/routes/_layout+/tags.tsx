@@ -221,13 +221,20 @@ const TagItem = ({
     </Td>
     <Td>
       <div className="flex min-w-32 items-center gap-2">
-        {item.useFor && item.useFor.length > 0 ? (
-          item.useFor.map((useFor) => (
-            <GrayBadge key={useFor}>{formatEnum(useFor)}</GrayBadge>
-          ))
-        ) : (
-          <GrayBadge>All</GrayBadge>
-        )}
+        {(() => {
+          // SQLite: useFor is stored as a JSON string — parse before rendering
+          const useForArr: string[] =
+            typeof item.useFor === "string"
+              ? (JSON.parse(item.useFor) as string[])
+              : (item.useFor as unknown as string[]);
+          return useForArr.length > 0 ? (
+            useForArr.map((useFor) => (
+              <GrayBadge key={useFor}>{formatEnum(useFor)}</GrayBadge>
+            ))
+          ) : (
+            <GrayBadge>All</GrayBadge>
+          );
+        })()}
       </div>
     </Td>
     <Td className="text-left">

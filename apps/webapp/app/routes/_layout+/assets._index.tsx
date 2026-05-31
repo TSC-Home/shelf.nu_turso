@@ -102,53 +102,29 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         }),
     ]);
 
-    const settings = await getAssetIndexSettings({
+    const rawSettings = await getAssetIndexSettings({
       userId,
       organizationId,
       canUseBarcodes,
       role,
     });
-    const mode = settings.mode;
+    // Force SIMPLE mode — the ADVANCED path uses PostgreSQL-specific raw SQL
+    // (jsonb_agg, ILIKE, ::type casts, LATERAL JOIN) incompatible with SQLite.
+    const settings = {
+      ...rawSettings,
+      mode: "SIMPLE" as typeof rawSettings.mode,
+    };
 
-    /** For base and self service users, we dont allow to view the advanced index */
-    if (mode === "ADVANCED" && ["BASE", "SELF_SERVICE"].includes(role)) {
-      await changeMode({
-        userId,
-        organizationId,
-        mode: "SIMPLE",
-      });
-      throw new ShelfError({
-        cause: null,
-        title: "Not allowed",
-        message:
-          "You don't have permission to access the advanced mode. We will automatically switch you back to 'simple' mode. Please reload the page.",
-        label: "Assets",
-        status: 403,
-        shouldBeCaptured: false,
-      });
-    }
-
-    return mode === "SIMPLE"
-      ? await simpleModeLoader({
-          request,
-          userId,
-          organizationId,
-          organizations,
-          role,
-          currentOrganization,
-          user,
-          settings,
-        })
-      : await advancedModeLoader({
-          request,
-          userId,
-          organizationId,
-          organizations,
-          role,
-          currentOrganization,
-          user,
-          settings,
-        });
+    return await simpleModeLoader({
+      request,
+      userId,
+      organizationId,
+      organizations,
+      role,
+      currentOrganization,
+      user,
+      settings,
+    });
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
     throw data(error(reason), { status: reason.status });
@@ -190,13 +166,18 @@ export async function action({ context, request }: ActionFunctionArgs) {
       action: intent2ActionMap[intent],
     });
 
-    // Fetch asset index settings to determine mode
-    const settings = await getAssetIndexSettings({
+    // Fetch asset index settings and force SIMPLE mode — the ADVANCED path
+    // uses PostgreSQL-specific raw SQL incompatible with SQLite/libSQL.
+    const rawActionSettings = await getAssetIndexSettings({
       userId,
       organizationId,
       canUseBarcodes,
       role,
     });
+    const settings = {
+      ...rawActionSettings,
+      mode: "SIMPLE" as typeof rawActionSettings.mode,
+    };
 
     switch (intent) {
       case "bulk-delete": {

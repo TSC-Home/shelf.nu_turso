@@ -48,7 +48,7 @@ export function useAssetAvailabilityData(items: Items) {
 
         return [
           ...asset.bookings.map((b) => {
-            const booking = b as AdvancedAssetBooking;
+            const booking = b as unknown as AdvancedAssetBooking;
             const custodianName = booking?.custodianUser
               ? resolveUserDisplayName(booking.custodianUser)
               : booking.custodianTeamMember?.name;

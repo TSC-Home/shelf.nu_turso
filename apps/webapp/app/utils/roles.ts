@@ -1,5 +1,20 @@
 import { OrganizationRoles } from "@prisma/client";
 
+/**
+ * SQLite stores the `roles` field as a JSON string (e.g. '["ADMIN","OWNER"]').
+ * Use this helper everywhere a DB-returned roles value is consumed as an array.
+ */
+export function parseRoles(
+  roles: string | OrganizationRoles[]
+): OrganizationRoles[] {
+  if (Array.isArray(roles)) return roles;
+  try {
+    return JSON.parse(roles) as OrganizationRoles[];
+  } catch {
+    return [];
+  }
+}
+
 const ROLE_RANK: Record<OrganizationRoles, number> = {
   [OrganizationRoles.OWNER]: 3,
   [OrganizationRoles.ADMIN]: 2,

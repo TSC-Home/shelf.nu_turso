@@ -38,7 +38,7 @@ function useBarcodeAddonState() {
   const actionFetcher = useFetcher();
   const disabled = useDisabled(actionFetcher);
 
-  const usedBarcodeTrial = currentOrganization?.usedBarcodeTrial ?? false;
+  const usedBarcodeTrial = false; // trial fields removed in self-hosted fork
 
   // Load prices on mount
   useEffect(() => {

@@ -8,7 +8,10 @@ import { BarcodeDisplay } from "~/components/barcode/barcode-display";
 import { Button } from "~/components/shared/button";
 import { useCurrentOrganization } from "~/hooks/use-current-organization";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
-import { resolveShowShelfBranding } from "~/utils/branding";
+import {
+  resolveLabelBrandingText,
+  resolveShowShelfBranding,
+} from "~/utils/branding";
 import { useBarcodePermissions } from "~/utils/permissions/use-barcode-permissions";
 import { slugify } from "~/utils/slugify";
 import { tw } from "~/utils/tw";
@@ -135,6 +138,10 @@ export const CodePreview = ({
   const resolvedShowShelfBranding = resolveShowShelfBranding(
     showShelfBranding,
     organization?.showShelfBranding
+  );
+  const resolvedLabelBrandingText = resolveLabelBrandingText(
+    organization?.labelBrandingText,
+    resolvedShowShelfBranding
   );
   const [isAddBarcodeDialogOpen, setIsAddBarcodeDialogOpen] = useState(false);
 
@@ -364,22 +371,34 @@ export const CodePreview = ({
       </div>
 
       {/* Code Preview */}
-      <div className="flex w-full justify-center pt-6">
+      <div className="flex w-full justify-center overflow-x-auto pt-6">
         {selectedCode?.type === "qr" ? (
-          <QrLabel
-            ref={captureDivRef}
-            data={{ qr: { id: selectedCode.id, ...selectedCode.qrData } }}
-            title={item.name}
-            qrIdDisplayPreference={organization?.qrIdDisplayPreference}
-            sequentialId={sequentialId}
-            showShelfBranding={resolvedShowShelfBranding}
-          />
+          organization?.labelTemplate === "HORIZONTAL_50X30" ? (
+            <HorizontalQrLabel
+              ref={captureDivRef}
+              data={{ qr: { id: selectedCode.id, ...selectedCode.qrData } }}
+              title={item.name}
+              qrIdDisplayPreference={organization?.qrIdDisplayPreference}
+              sequentialId={sequentialId}
+              labelBrandingText={resolvedLabelBrandingText}
+              labelCustomText={organization?.labelCustomText}
+            />
+          ) : (
+            <QrLabel
+              ref={captureDivRef}
+              data={{ qr: { id: selectedCode.id, ...selectedCode.qrData } }}
+              title={item.name}
+              qrIdDisplayPreference={organization?.qrIdDisplayPreference}
+              sequentialId={sequentialId}
+              labelBrandingText={resolvedLabelBrandingText}
+            />
+          )
         ) : selectedCode?.type === "barcode" ? (
           <BarcodeLabel
             ref={captureDivRef}
             data={selectedCode.barcodeData}
             title={item.name}
-            showShelfBranding={resolvedShowShelfBranding}
+            labelBrandingText={resolvedLabelBrandingText}
           />
         ) : null}
       </div>
@@ -433,7 +452,8 @@ interface QrLabelProps {
   title: string;
   qrIdDisplayPreference?: string;
   sequentialId?: string | null;
-  showShelfBranding?: boolean;
+  /** Pre-resolved branding text. Pass `null` to hide the branding footer. */
+  labelBrandingText?: string | null;
 }
 
 export const QrLabel = React.forwardRef<HTMLDivElement, QrLabelProps>(
@@ -443,7 +463,7 @@ export const QrLabel = React.forwardRef<HTMLDivElement, QrLabelProps>(
       title,
       qrIdDisplayPreference,
       sequentialId,
-      showShelfBranding = true,
+      labelBrandingText,
     } = props ?? {};
     return (
       <div style={QR_LABEL_STYLE} ref={ref}>
@@ -460,12 +480,7 @@ export const QrLabel = React.forwardRef<HTMLDivElement, QrLabelProps>(
               ? sequentialId
               : data?.qr?.id}
           </div>
-          {showShelfBranding ? (
-            <div>
-              Powered by{" "}
-              <span className="font-semibold text-black">shelf.nu</span>
-            </div>
-          ) : null}
+          {labelBrandingText ? <div>{labelBrandingText}</div> : null}
         </div>
       </div>
     );
@@ -479,12 +494,13 @@ interface BarcodeLabelProps {
     value: string;
   };
   title: string;
-  showShelfBranding?: boolean;
+  /** Pre-resolved branding text. Pass `null` to hide the branding footer. */
+  labelBrandingText?: string | null;
 }
 
 export const BarcodeLabel = React.forwardRef<HTMLDivElement, BarcodeLabelProps>(
   function BarcodeLabel(props, ref) {
-    const { data, title, showShelfBranding = true } = props ?? {};
+    const { data, title, labelBrandingText } = props ?? {};
 
     if (!data) return null;
 
@@ -513,14 +529,121 @@ export const BarcodeLabel = React.forwardRef<HTMLDivElement, BarcodeLabelProps>(
               )}
             </div>
           </div>
-          {showShelfBranding ? (
-            <div>
-              Powered by{" "}
-              <span className="font-semibold text-black">shelf.nu</span>
-            </div>
-          ) : null}
+          {labelBrandingText ? <div>{labelBrandingText}</div> : null}
         </div>
       </div>
     );
   }
 );
+
+/** Container style for the horizontal 50 mm × 30 mm label (5:3 aspect ratio). */
+const HORIZONTAL_LABEL_STYLE: CSSProperties = {
+  width: "500px",
+  height: "300px",
+  display: "flex",
+  flexDirection: "row",
+  alignItems: "stretch",
+  borderRadius: "4px",
+  border: "5px solid #E3E4E8",
+  backgroundColor: "white",
+  overflow: "hidden",
+};
+
+interface HorizontalQrLabelProps {
+  data?: { qr?: QrDef };
+  title: string;
+  qrIdDisplayPreference?: string;
+  sequentialId?: string | null;
+  /** Pre-resolved branding text shown at the bottom of the right column. */
+  labelBrandingText?: string | null;
+  /** Workspace-wide custom text shown above the branding footer. */
+  labelCustomText?: string | null;
+}
+
+/**
+ * Horizontal QR label — 50 mm × 30 mm.
+ *
+ * Layout: QR code on the left half, product name / ID / custom text on the right.
+ */
+export const HorizontalQrLabel = React.forwardRef<
+  HTMLDivElement,
+  HorizontalQrLabelProps
+>(function HorizontalQrLabel(props, ref) {
+  const {
+    data,
+    title,
+    qrIdDisplayPreference,
+    sequentialId,
+    labelBrandingText,
+    labelCustomText,
+  } = props ?? {};
+
+  const displayId =
+    qrIdDisplayPreference === "SAM_ID" && sequentialId
+      ? sequentialId
+      : data?.qr?.id;
+
+  return (
+    <div style={HORIZONTAL_LABEL_STYLE} ref={ref}>
+      {/* Left: QR code */}
+      <div
+        style={{
+          width: "50%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: "12px",
+          borderRight: "3px solid #E3E4E8",
+        }}
+      >
+        <figure className="qr-code">
+          <img
+            src={data?.qr?.src}
+            alt={`${data?.qr?.size}-shelf-qr-code.png`}
+            style={{ maxWidth: "100%", maxHeight: "100%" }}
+          />
+        </figure>
+      </div>
+
+      {/* Right: product name, ID, custom text, branding */}
+      <div
+        style={{
+          width: "50%",
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: "space-between",
+          padding: "14px 12px",
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            fontSize: "13px",
+            fontWeight: 700,
+            color: "black",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {title}
+        </div>
+
+        <div style={{ fontSize: "11px", fontWeight: 600, color: "#333" }}>
+          {displayId}
+        </div>
+
+        <div style={{ fontSize: "10px", color: "#555" }}>
+          {labelCustomText ? (
+            <div style={{ marginBottom: labelBrandingText ? "2px" : 0 }}>
+              {labelCustomText}
+            </div>
+          ) : null}
+          {labelBrandingText ? (
+            <div style={{ color: "#888" }}>{labelBrandingText}</div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+});

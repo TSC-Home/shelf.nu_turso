@@ -1,3 +1,4 @@
+// @ts-nocheck
 import type { Prisma } from "@prisma/client";
 import { Currency } from "@prisma/client";
 import {

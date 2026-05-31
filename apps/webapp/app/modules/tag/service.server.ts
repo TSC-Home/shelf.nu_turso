@@ -46,12 +46,12 @@ export async function getTags(params: {
     if (search) {
       where.name = {
         contains: search,
-        mode: "insensitive",
       };
     }
 
     if (useFor) {
-      where.useFor = { has: useFor as TagUseFor };
+      // SQLite: useFor is a JSON string, use contains for membership check
+      where.useFor = { contains: `"${useFor}"` };
     }
 
     const [tags, totalTags] = await Promise.all([
@@ -94,7 +94,8 @@ export async function createTag({
       data: {
         name: loadash.trim(name),
         description,
-        useFor,
+        // SQLite: useFor is stored as a JSON string
+        useFor: JSON.stringify(useFor),
         color,
         user: {
           connect: {
@@ -169,7 +170,7 @@ export async function createTagsIfNotExists({
     for (const tag of Object.keys(tags)) {
       const existingTag = await db.tag.findFirst({
         where: {
-          name: { equals: tag, mode: "insensitive" },
+          name: { equals: tag },
           organizationId,
         },
       });
@@ -259,9 +260,8 @@ export async function updateTag({
         name: loadash.trim(name),
         description,
         color,
-        useFor: {
-          set: useFor,
-        },
+        // SQLite: useFor is stored as a JSON string
+        useFor: JSON.stringify(useFor),
       },
     });
   } catch (cause) {
@@ -309,9 +309,10 @@ export async function getTagsForBookingTagsFilter({
     const tags = await db.tag.findMany({
       where: {
         organizationId,
+        // SQLite: useFor is a JSON string; use equals/contains for array checks
         OR: [
-          { useFor: { isEmpty: true } },
-          { useFor: { has: TagUseFor.BOOKING } },
+          { useFor: { equals: "[]" } },
+          { useFor: { contains: `"${TagUseFor.BOOKING}"` } },
         ],
       },
     });

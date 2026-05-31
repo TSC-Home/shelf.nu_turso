@@ -11,7 +11,7 @@ const baseCustomField: CustomField = {
   required: false,
   active: true,
   type: "AMOUNT",
-  options: [],
+  options: "[]", // SQLite: options is stored as a JSON string
   organizationId: "org_1",
   userId: "user_1",
   createdAt: new Date("2023-01-01T00:00:00.000Z"),

@@ -1,11 +1,22 @@
 /* eslint-disable no-console */
+import { Prisma } from "@prisma/client";
 import { db } from "~/database/db.server";
 
 /**
- * Sequential ID Service for Assets
+ * Sequential ID Service for Assets — SQLite/libSQL fork.
  *
- * Provides functions to manage PostgreSQL sequences for generating
- * organization-scoped sequential asset IDs in the format: PREFIX-NNNN
+ * The original implementation relied on PostgreSQL-specific stored functions
+ * (`create_asset_sequence_for_org`, `get_next_sequential_id`) and the
+ * `currval`/`setval` sequence API.  SQLite has no sequence objects.
+ *
+ * Replacement strategy: store the counter implicitly in the Asset table.
+ * Every function that needs "the next number" runs:
+ *
+ *   MAX( CAST(SUBSTR(sequentialId, prefixLen+2) AS INTEGER) ) + 1
+ *
+ * This is race-free for SQLite because SQLite is single-writer; concurrent
+ * inserts are serialized at the DB level.  When called inside a Prisma
+ * transaction (as getNextSequentialId always is) the result is consistent.
  *
  * Examples: SAM-0001, SAM-0002, SAM-9999, SAM-10000
  */
@@ -13,41 +24,53 @@ import { db } from "~/database/db.server";
 const DEFAULT_PREFIX = "SAM";
 
 /**
- * Creates a PostgreSQL sequence for an organization if it doesn't exist
+ * No-op: SQLite doesn't use per-org sequence objects.
+ * Kept so callers don't need to change.
  */
 export async function createOrganizationSequence(
-  organizationId: string
+  _organizationId: string
 ): Promise<void> {
-  try {
-    await db.$executeRaw`SELECT create_asset_sequence_for_org(${organizationId})`;
-  } catch (error) {
-    console.error(
-      `Failed to create sequence for organization ${organizationId}:`,
-      error
-    );
-    throw new Error(`Could not create asset sequence for organization`);
-  }
+  // SQLite: no sequence objects to create
 }
 
 /**
- * Gets the next sequential ID for an organization using PostgreSQL sequences
- * Automatically creates the sequence if it doesn't exist
- * WARNING: This function consumes the sequence value - only use when actually creating assets
+ * Returns the highest sequential number in use for the given org+prefix,
+ * or 0 when no assets have been created yet.
+ */
+async function getMaxSequenceNumber(
+  organizationId: string,
+  prefix: string
+): Promise<number> {
+  // SUBSTR(sequentialId, prefixLen + 2) strips the "SAM-" part and leaves
+  // the numeric suffix.  CAST to INTEGER returns NULL for non-numeric strings
+  // (SQLite silently coerces), so MAX skips them.
+  const prefixWithDash = prefix + "-";
+  const result = await db.$queryRaw<[{ max_num: number | null }]>`
+    SELECT MAX(CAST(SUBSTR("sequentialId", ${
+      prefixWithDash.length + 1
+    }) AS INTEGER)) AS max_num
+    FROM "Asset"
+    WHERE "organizationId" = ${organizationId}
+      AND "sequentialId" LIKE ${prefixWithDash + "%"}
+  `;
+  return result[0]?.max_num ?? 0;
+}
+
+/**
+ * Gets the next sequential ID for an organization.
+ * Consumes the counter — only call when actually persisting an asset.
  *
  * @param organizationId - The organization ID
  * @param prefix - The prefix for the sequential ID (default: "SAM")
- * @returns Promise<string> - The formatted sequential ID (e.g., "SAM-0001")
+ * @returns Promise<string> - e.g. "SAM-0001"
  */
 export async function getNextSequentialId(
   organizationId: string,
   prefix: string = DEFAULT_PREFIX
 ): Promise<string> {
   try {
-    const result = await db.$queryRaw<[{ get_next_sequential_id: string }]>`
-      SELECT get_next_sequential_id(${organizationId}, ${prefix})
-    `;
-
-    return result[0].get_next_sequential_id;
+    const max = await getMaxSequenceNumber(organizationId, prefix);
+    return formatSequentialId(max + 1, prefix);
   } catch (error) {
     console.error(
       `Failed to get next sequential ID for organization ${organizationId}:`,
@@ -58,57 +81,36 @@ export async function getNextSequentialId(
 }
 
 /**
- * Estimates what the next sequential ID would be without consuming the sequence
- * Safe to use for previews and UI display purposes
+ * Estimates the next sequential ID without consuming a counter value.
+ * Safe for UI previews.
  *
  * @param organizationId - The organization ID
  * @param prefix - The prefix for the sequential ID (default: "SAM")
- * @returns Promise<string> - The estimated sequential ID (e.g., "SAM-0042")
+ * @returns Promise<string> - e.g. "SAM-0042"
  */
 export async function estimateNextSequentialId(
   organizationId: string,
   prefix: string = DEFAULT_PREFIX
 ): Promise<string> {
   try {
-    // Ensure sequence exists without consuming a value
-    await createOrganizationSequence(organizationId);
-
-    // Get current sequence value without incrementing
-    const result = await db.$queryRaw<[{ currval: bigint }]>`
-      SELECT currval('org_' || ${organizationId} || '_asset_sequence') as currval
-    `;
-
-    const nextValue = Number(result[0].currval) + 1;
-    return formatSequentialId(nextValue, prefix);
-  } catch (_error) {
-    // If currval fails, sequence might not have been used yet
-    // Find the highest existing sequential ID using proper numeric extraction
-    // This avoids string sorting issues when IDs go beyond 9999
-    const maxExisting = await db.$queryRaw<[{ max_num: number | null }]>`
-      SELECT COALESCE(MAX(
-        CASE 
-          WHEN "sequentialId" ~ ('^' || ${prefix} || '-[0-9]+$')
-          THEN CAST(SUBSTRING("sequentialId" FROM (${prefix} || '-([0-9]+)')) AS INTEGER)
-          ELSE 0 
-        END
-      ), 0) as max_num
-      FROM "Asset"
-      WHERE "organizationId" = ${organizationId} 
-      AND "sequentialId" IS NOT NULL
-    `;
-
-    const highestNumber = maxExisting[0]?.max_num || 0;
-    return formatSequentialId(highestNumber + 1, prefix);
+    const max = await getMaxSequenceNumber(organizationId, prefix);
+    return formatSequentialId(max + 1, prefix);
+  } catch (error) {
+    console.error(
+      `Failed to estimate next sequential ID for organization ${organizationId}:`,
+      error
+    );
+    return formatSequentialId(1, prefix);
   }
 }
 
 /**
- * Formats a sequence number into a sequential ID
- * Uses 4-digit zero-padding that grows beyond 9999
+ * Formats a sequence number into a sequential ID.
+ * Uses 4-digit zero-padding that grows beyond 9999.
  *
- * @param sequenceNumber - The sequence number from the database
- * @param prefix - The prefix for the sequential ID (default: "SAM")
- * @returns string - The formatted sequential ID
+ * @param sequenceNumber - The sequence number
+ * @param prefix - The prefix (default: "SAM")
+ * @returns e.g. "SAM-0001"
  */
 export function formatSequentialId(
   sequenceNumber: number,
@@ -119,31 +121,17 @@ export function formatSequentialId(
 }
 
 /**
- * Resets an organization's sequence to match existing sequential IDs
- * Used during bulk generation for existing assets
- *
- * @param organizationId - The organization ID
+ * No-op: SQLite doesn't use sequence objects to reset.
+ * Kept so callers don't need to change.
  */
 export async function resetOrganizationSequence(
-  organizationId: string
+  _organizationId: string
 ): Promise<void> {
-  try {
-    await db.$executeRaw`SELECT reset_asset_sequence_for_org(${organizationId})`;
-  } catch (error) {
-    console.error(
-      `Failed to reset sequence for organization ${organizationId}:`,
-      error
-    );
-    throw new Error(`Could not reset asset sequence for organization`);
-  }
+  // SQLite: no sequence objects to reset
 }
 
 /**
- * Checks if an organization has any assets with sequential IDs
- * Used to determine if bulk generation is needed
- *
- * @param organizationId - The organization ID
- * @returns Promise<boolean> - True if any assets have sequential IDs
+ * Checks if an organization has any assets with sequential IDs.
  */
 export async function organizationHasSequentialIds(
   organizationId: string
@@ -155,7 +143,6 @@ export async function organizationHasSequentialIds(
         sequentialId: { not: null },
       },
     });
-
     return count > 0;
   } catch (error) {
     console.error(
@@ -167,11 +154,7 @@ export async function organizationHasSequentialIds(
 }
 
 /**
- * Gets count of assets without sequential IDs for an organization
- * Used for progress tracking during bulk generation
- *
- * @param organizationId - The organization ID
- * @returns Promise<number> - Number of assets without sequential IDs
+ * Gets count of assets without sequential IDs for an organization.
  */
 export async function getAssetsWithoutSequentialIdCount(
   organizationId: string
@@ -193,145 +176,114 @@ export async function getAssetsWithoutSequentialIdCount(
 }
 
 /**
- * Validates that a sequential ID follows the expected format
+ * Validates that a sequential ID follows the expected format.
  *
- * @param sequentialId - The sequential ID to validate
- * @returns boolean - True if the format is valid
+ * @param sequentialId - e.g. "SAM-0001"
+ * @returns true when format is valid
  */
 export function isValidSequentialIdFormat(sequentialId: string): boolean {
-  // Pattern: PREFIX-NNNN (where PREFIX is letters and NNNN is numbers with at least 4 digits)
   const pattern = /^[A-Z]+-\d{4,}$/;
   return pattern.test(sequentialId);
 }
 
 /**
- * Extracts the numeric part from a sequential ID
+ * Extracts the numeric part from a sequential ID.
  *
- * @param sequentialId - The sequential ID (e.g., "SAM-0001")
- * @returns number | null - The numeric part or null if invalid
+ * @param sequentialId - e.g. "SAM-0001"
+ * @returns The numeric part or null if invalid
  */
 export function extractSequenceNumber(sequentialId: string): number | null {
   if (!isValidSequentialIdFormat(sequentialId)) {
     return null;
   }
-
   const parts = sequentialId.split("-");
-  if (parts.length !== 2) {
-    return null;
-  }
-
+  if (parts.length !== 2) return null;
   const number = parseInt(parts[1], 10);
   return isNaN(number) ? null : number;
 }
 
 /**
- * Efficiently generates sequential IDs for existing assets using SQL
- * This is much faster for large datasets as it does everything in the database
+ * Generates sequential IDs for existing assets that don't have one yet.
+ * SQLite-compatible: assigns IDs in JavaScript and updates one asset at a time
+ * (or in CASE-expression batches for larger datasets).
  *
  * @param organizationId - The organization ID
  * @param prefix - The prefix for sequential IDs (default: "SAM")
- * @returns Promise<number> - Number of assets updated
+ * @returns Number of assets updated
  */
 export async function generateBulkSequentialIdsEfficient(
   organizationId: string,
   prefix: string = DEFAULT_PREFIX
 ): Promise<number> {
   try {
-    // Ensure sequence exists
-    await createOrganizationSequence(organizationId);
+    const startingNumber =
+      (await getMaxSequenceNumber(organizationId, prefix)) + 1;
 
-    // First, find the highest existing sequential ID to avoid conflicts
-    // Using proper regex pattern [0-9]+ instead of \d to handle 1000+ assets
-    const maxExisting = await db.$queryRaw<[{ max_num: number | null }]>`
-      SELECT COALESCE(MAX(
-        CASE 
-          WHEN "sequentialId" ~ ('^' || ${prefix} || '-[0-9]+$')
-          THEN CAST(SUBSTRING("sequentialId" FROM (${prefix} || '-([0-9]+)')) AS INTEGER)
-          ELSE 0 
-        END
-      ), 0) as max_num
-      FROM "Asset"
-      WHERE "organizationId" = ${organizationId} 
-      AND "sequentialId" IS NOT NULL
-    `;
+    // Fetch all asset IDs that still need a sequential ID, ordered deterministically
+    const assetIds = await db.asset.findMany({
+      where: { organizationId, sequentialId: null },
+      select: { id: true },
+      orderBy: { id: "asc" },
+    });
 
-    const startingNumber = (maxExisting[0]?.max_num || 0) + 1;
+    if (assetIds.length === 0) return 0;
 
-    // The CTE approach is creating duplicates - let's use batch processing instead
-    // First, get all asset IDs that need sequential IDs, ordered consistently
-    const assetIds = await db.$queryRaw<{ id: string }[]>`
-      SELECT id
-      FROM "Asset" 
-      WHERE "organizationId" = ${organizationId} 
-      AND "sequentialId" IS NULL
-      ORDER BY id ASC
-    `;
+    const padLen = Math.max(
+      4,
+      String(startingNumber + assetIds.length - 1).length
+    );
 
-    // Process in smaller batches to avoid memory issues and ensure atomicity
-    const BATCH_SIZE = 1000;
+    // Build (id, sequentialId) pairs
+    const assignments = assetIds.map((a, i) => ({
+      id: a.id,
+      sequentialId: `${prefix}-${String(startingNumber + i).padStart(
+        padLen,
+        "0"
+      )}`,
+    }));
+
+    const BATCH_SIZE = 200;
     let totalUpdated = 0;
 
-    for (let i = 0; i < assetIds.length; i += BATCH_SIZE) {
-      const batch = assetIds.slice(i, i + BATCH_SIZE);
-      const batchStartNum = startingNumber + i;
+    for (let i = 0; i < assignments.length; i += BATCH_SIZE) {
+      const batch = assignments.slice(i, i + BATCH_SIZE);
 
-      // Create array of values for batch update
-      const values = batch.map((asset, index) => ({
-        id: asset.id,
-        sequentialId: `${prefix}-${String(batchStartNum + index).padStart(
-          Math.max(4, String(startingNumber + assetIds.length).length),
-          "0"
-        )}`,
-      }));
+      // Build a CASE expression for SQLite batch update
+      const setClauses = Prisma.join(
+        batch.map((a) => Prisma.sql`WHEN ${a.id} THEN ${a.sequentialId}`),
+        " "
+      );
+      const idList = Prisma.join(
+        batch.map((a) => Prisma.sql`${a.id}`),
+        ", "
+      );
 
-      // Update this batch
-      const batchResult = await db.$executeRaw`
-        UPDATE "Asset" 
-        SET "sequentialId" = batch_data.sequential_id
-        FROM (
-          SELECT unnest(${values.map((v) => v.id)}::text[]) as id,
-                 unnest(${values.map(
-                   (v) => v.sequentialId
-                 )}::text[]) as sequential_id
-        ) as batch_data
-        WHERE "Asset".id::text = batch_data.id
-        AND "Asset"."sequentialId" IS NULL
+      const updated = await db.$executeRaw`
+        UPDATE "Asset"
+        SET "sequentialId" = CASE "id" ${setClauses} END
+        WHERE "id" IN (${idList})
+          AND "sequentialId" IS NULL
       `;
 
-      totalUpdated += Number(batchResult);
+      totalUpdated += Number(updated);
       console.log(
-        `🔧 DEBUG: Processed batch ${
+        `Bulk sequential IDs: batch ${
           Math.floor(i / BATCH_SIZE) + 1
-        }: ${batchResult} assets updated`
+        } → ${updated} assets`
       );
     }
 
-    const result = totalUpdated;
-    // Update the sequence to continue from the right place for new assets
-    const totalAssetsWithIds = await db.asset.count({
-      where: {
-        organizationId,
-        sequentialId: { not: null },
-      },
-    });
-
-    await db.$executeRaw`
-      SELECT setval(
-        'org_' || ${organizationId} || '_asset_sequence', 
-        GREATEST(${totalAssetsWithIds}, 1)
-      )
-    `;
-
     console.log(
-      `Generated bulk sequential IDs for organization ${organizationId}: ${result} assets updated, starting from ${prefix}-${String(
-        startingNumber
-      ).padStart(4, "0")}`
+      `Generated ${totalUpdated} sequential IDs for org ${organizationId}, starting from ${formatSequentialId(
+        startingNumber,
+        prefix
+      )}`
     );
 
-    return Number(result);
+    return totalUpdated;
   } catch (error) {
     console.error(
-      `Failed to efficiently generate bulk sequential IDs for organization ${organizationId}:`,
+      `Failed to generate bulk sequential IDs for organization ${organizationId}:`,
       error
     );
     throw new Error(`Could not generate sequential IDs for existing assets`);

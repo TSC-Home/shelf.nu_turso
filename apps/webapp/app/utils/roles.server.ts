@@ -8,6 +8,7 @@ import type {
   PermissionEntity,
 } from "./permissions/permission.data";
 import { validatePermission } from "./permissions/permission.validator.server";
+import { parseRoles } from "./roles";
 
 export async function requireUserWithPermission(name: Roles, userId: string) {
   try {
@@ -71,19 +72,20 @@ export async function requirePermission({
     currentOrganization,
   } = await getSelectedOrganization({ userId, request });
 
-  const roles = userOrganizations.find(
-    (o) => o.organization.id === organizationId
-  )?.roles;
+  const parsedRoles = parseRoles(
+    userOrganizations.find((o) => o.organization.id === organizationId)
+      ?.roles ?? "[]"
+  );
 
   await validatePermission({
-    roles,
+    roles: parsedRoles,
     action,
     entity,
     organizationId,
     userId,
   });
 
-  const role = roles ? roles[0] : OrganizationRoles.BASE;
+  const role = parsedRoles[0] ?? OrganizationRoles.BASE;
 
   const isSelfServiceOrBase =
     role === OrganizationRoles.SELF_SERVICE || role === OrganizationRoles.BASE;
@@ -113,11 +115,9 @@ export async function requirePermission({
     (role === OrganizationRoles.BASE &&
       currentOrganization.baseUserCanSeeCustody);
 
-  // Determine if user can use barcodes based on organization settings
-  const canUseBarcodes = currentOrganization.barcodesEnabled ?? false;
-
-  // Determine if user can use audits based on organization settings
-  const canUseAudits = currentOrganization.auditsEnabled ?? false;
+  // Fields removed in self-hosted fork — features always enabled.
+  const canUseBarcodes = true;
+  const canUseAudits = true;
 
   return {
     organizations,

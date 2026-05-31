@@ -411,15 +411,11 @@ export async function assertUserCanInviteUsersToWorkspace({
 /** End Team Features */
 
 /** Audit Add-on */
-export const canUseAudits = (org: { auditsEnabled: boolean }) => {
-  if (!premiumIsEnabled) return true;
-  return org.auditsEnabled;
-};
+// auditsEnabled / barcodesEnabled removed from schema in SQLite fork — always enabled.
+export const canUseAudits = (_org: unknown) => true;
 /** End Audit Add-on */
 
 /** Barcode Add-on */
-export const canUseBarcodes = (org: { barcodesEnabled: boolean }) => {
-  if (!premiumIsEnabled) return true;
-  return org.barcodesEnabled;
-};
+// auditsEnabled / barcodesEnabled removed from schema in SQLite fork — always enabled.
+export const canUseBarcodes = (_org: unknown) => true;
 /** End Barcode Add-on */

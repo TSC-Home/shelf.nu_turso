@@ -26,7 +26,6 @@ export function getKitsWhereInput({
   if (search) {
     where.name = {
       contains: search.toLowerCase().trim(),
-      mode: "insensitive",
     };
   }
 

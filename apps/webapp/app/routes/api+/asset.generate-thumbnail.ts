@@ -2,7 +2,6 @@ import { data, type LoaderFunctionArgs } from "react-router";
 import { z } from "zod";
 import { extractStoragePath } from "~/components/assets/asset-image/utils";
 import { db } from "~/database/db.server";
-import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import { ShelfError } from "~/utils/error";
 import { payload, parseData } from "~/utils/http.server";
 import { Logger } from "~/utils/logger";
@@ -12,7 +11,11 @@ import {
   PermissionEntity,
 } from "~/utils/permissions/permission.data";
 import { requirePermission } from "~/utils/roles.server";
-import { createSignedUrl, uploadFile } from "~/utils/storage.server";
+import {
+  createSignedUrl,
+  readStorageFile,
+  uploadFile,
+} from "~/utils/storage.server";
 
 const THUMBNAIL_SIZE = 108;
 
@@ -145,11 +148,11 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       );
     }
 
-    // Download the original image from Supabase
-    const { data: originalFile, error: downloadError } =
-      await getSupabaseAdmin().storage.from("assets").download(originalPath);
-
-    if (downloadError) {
+    // Download the original image from storage
+    let buffer: Buffer;
+    try {
+      buffer = await readStorageFile("assets", originalPath);
+    } catch {
       // If download fails, return existing values
       return data(
         payload({
@@ -161,32 +164,24 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       );
     }
 
-    // Convert to AsyncIterable for the uploadFile function
-    const arrayBuffer = await originalFile.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
-    // Create an async iterable from the buffer - use a proper async generator
+    // Create an async iterable from the buffer
     const createAsyncIterable = async function* () {
-      await Promise.resolve(); // Add await to satisfy eslint
+      await Promise.resolve();
       yield new Uint8Array(buffer);
     };
 
     // Generate thumbnail filename
     let thumbnailPath: string;
-
-    // Check if the file has an extension
     if (originalPath.includes(".")) {
-      // File has extension, replace before the extension
       thumbnailPath = originalPath.replace(/(\.[^.]+)$/, "-thumbnail$1");
     } else {
-      // File has no extension, just append -thumbnail
       thumbnailPath = `${originalPath}-thumbnail`;
     }
 
     // Create and upload thumbnail
     const uploadedPath = await uploadFile(createAsyncIterable(), {
       filename: thumbnailPath,
-      contentType: originalFile.type,
+      contentType: "image/jpeg",
       bucketName: "assets",
       resizeOptions: {
         width: THUMBNAIL_SIZE,

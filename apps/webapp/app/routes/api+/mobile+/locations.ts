@@ -23,9 +23,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const locations = await db.location.findMany({
       where: {
         organizationId,
-        ...(search
-          ? { name: { contains: search, mode: "insensitive" as const } }
-          : {}),
+        ...(search ? { name: { contains: search } } : {}),
       },
       select: {
         id: true,

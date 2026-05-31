@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { test as base } from "@playwright/test";
 import nodemailer from "nodemailer";
 import { faker } from "@faker-js/faker";

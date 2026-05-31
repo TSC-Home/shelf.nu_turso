@@ -321,7 +321,12 @@ function OptionSelect({
 
   // Filter options based on search
   const filteredOptions = useMemo(() => {
-    const options = field.options.filter((o) => o !== null && o !== "");
+    // SQLite stores options as a JSON string — parse it to an array
+    const parsedOptions: string[] =
+      typeof field.options === "string"
+        ? (JSON.parse(field.options) as string[])
+        : (field.options as unknown as string[]);
+    const options = parsedOptions.filter((o) => o !== null && o !== "");
     if (!searchQuery) return options;
 
     return options.filter((option) =>

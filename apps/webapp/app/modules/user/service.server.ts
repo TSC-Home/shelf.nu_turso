@@ -1,9 +1,4 @@
-import type {
-  Organization,
-  TierId,
-  User,
-  UserOrganization,
-} from "@prisma/client";
+import type { Organization, User, UserOrganization } from "@prisma/client";
 import {
   Prisma,
   Roles,
@@ -21,7 +16,6 @@ import { db } from "~/database/db.server";
 
 import { SOFT_DELETED_EMAIL_DOMAIN } from "~/emails/email.worker.server";
 import { sendEmail } from "~/emails/mail.server";
-import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import {
   deleteAuthAccount,
   createEmailAuthAccount,
@@ -29,6 +23,7 @@ import {
   signInWithEmail,
   updateAccountPassword,
 } from "~/modules/auth/service.server";
+import type { TierId } from "~/modules/tier/service.server";
 
 import { DEFAULT_MAX_IMAGE_UPLOAD_SIZE } from "~/utils/constants";
 import { dateTimeInUnix } from "~/utils/date-time-in-unix";
@@ -39,6 +34,7 @@ import { getCurrentSearchParams } from "~/utils/http.server";
 import { id as generateId } from "~/utils/id/id.server";
 import { getParamsValues } from "~/utils/list";
 import { Logger } from "~/utils/logger";
+import { parseRoles } from "~/utils/roles";
 import { getRoleFromGroupId } from "~/utils/roles.server";
 import {
   deleteProfilePicture,
@@ -199,12 +195,10 @@ async function createUserOrgAssociation(
           create: {
             userId,
             organizationId,
-            roles,
+            roles: JSON.stringify(roles),
           },
           update: {
-            roles: {
-              push: roles,
-            },
+            roles: JSON.stringify(roles),
           },
         })
       )
@@ -479,9 +473,8 @@ async function handleSCIMTransition(
           },
         },
         data: {
-          roles: {
-            set: [desiredRole],
-          },
+          // SQLite: roles is a JSON string — serialize instead of using array set
+          roles: JSON.stringify([desiredRole]),
         },
       });
 
@@ -593,7 +586,7 @@ export async function updateUserFromSSO(
           const transition = await handleSCIMTransition(
             userId,
             org,
-            existingOrgAccess.roles,
+            parseRoles(existingOrgAccess.roles),
             desiredRole
           );
           transitions.push(transition);
@@ -876,39 +869,13 @@ export async function updateUserEmail({
   newEmail: string;
 }) {
   try {
-    /**
-     * Update the user in supabase auth
-     */
-    const { error } = await getSupabaseAdmin().auth.admin.updateUserById(
-      userId,
-      {
-        email: newEmail,
-      }
-    );
-
-    if (error) {
-      throw new ShelfError({
-        cause: error,
-        message:
-          "Failed to update email in auth. Please try again and if the issue persists, contact support",
-        additionalData: { userId, newEmail, currentEmail },
-        label,
-      });
-    }
-
-    /** Update the user in the DB */
+    /** Update the user email in the DB (email is the source of truth in our auth layer) */
     const updatedUser = await db.user
       .update({
         where: { id: userId },
         data: { email: newEmail },
       })
       .catch((cause) => {
-        // On failure, revert the change of the user update in auth
-        void getSupabaseAdmin().auth.admin.updateUserById(userId, {
-          email: currentEmail,
-        });
-
-        // Unique email constraint is being handled automatically by `getSupabaseAdmin().auth.admin.generateLink`
         throw new ShelfError({
           cause,
           message: "Failed to update email in shelf",
@@ -993,22 +960,18 @@ async function getUsers({
         {
           email: {
             contains: search,
-            mode: "insensitive",
           },
         },
         {
           id: {
             contains: search,
-            mode: "insensitive",
           },
         },
       ];
     }
 
-    /** If tierId filter exists, add it to the where object */
-    if (tierId) {
-      where.tierId = tierId as TierId;
-    }
+    /** If tierId filter exists, skip — tierId/tier not available in SQLite build */
+    void tierId;
 
     const [users, totalUsers] = await Promise.all([
       /** Get the users */
@@ -1018,7 +981,6 @@ async function getUsers({
         where,
         orderBy: { createdAt: "desc" },
         include: {
-          tier: true,
           userOrganizations: {
             select: {
               roles: true,
@@ -1138,7 +1100,7 @@ export async function softDeleteUser(id: User["id"]) {
     });
 
     const organizationsTheUserDoesNotOwn = user.userOrganizations.filter(
-      (uo) => !uo.roles.includes(OrganizationRoles.OWNER)
+      (uo) => !parseRoles(uo.roles).includes(OrganizationRoles.OWNER)
     );
 
     await db.$transaction(async (tx) => {
@@ -1205,11 +1167,8 @@ export async function softDeleteUser(id: User["id"]) {
       await deleteProfilePicture({ url: user.profilePicture });
     }
 
-    /** Delete the auth user. This should also destroy all their current sessions */
-    const { error } = await getSupabaseAdmin().auth.admin.deleteUser(
-      user.id,
-      true // Soft delete
-    );
+    /** Delete the auth credentials (password + all sessions) */
+    await deleteAuthAccount(user.id);
 
     /** Send an email to the user that their request has been completed */
     void sendEmail({
@@ -1217,23 +1176,6 @@ export async function softDeleteUser(id: User["id"]) {
       subject: "Your account has been deleted",
       text: `Your shelf account has been deleted. \n\n Kind regards, \n Shelf Team\n\n`,
     });
-
-    if (error) {
-      // If the auth user is already gone (e.g., deleted externally),
-      // that's fine — we can proceed with the rest of the cleanup
-      const isUserNotFound =
-        error.status === 404 ||
-        ("code" in error && error.code === "user_not_found");
-
-      if (!isUserNotFound) {
-        throw new ShelfError({
-          cause: error,
-          message: "Failed to delete Auth user",
-          additionalData: { id, error },
-          label: "Auth",
-        });
-      }
-    }
   } catch (cause) {
     if (
       cause instanceof PrismaClientKnownRequestError &&
@@ -1412,7 +1354,7 @@ export async function changeUserRole({
       });
     }
 
-    const currentRole = userOrg.roles[0];
+    const currentRole = parseRoles(userOrg.roles)[0];
 
     if (currentRole === OrganizationRoles.OWNER) {
       throw new ShelfError({
@@ -1462,7 +1404,8 @@ export async function changeUserRole({
         },
       },
       data: {
-        roles: { set: [newRole] },
+        // SQLite: roles is a JSON string — serialize instead of using array set
+        roles: JSON.stringify([newRole]),
       },
     });
 

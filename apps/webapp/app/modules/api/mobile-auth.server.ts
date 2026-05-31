@@ -1,16 +1,17 @@
 import { OrganizationRoles } from "@prisma/client";
 import { db } from "~/database/db.server";
-import { getSupabaseAdmin } from "~/integrations/supabase/client";
+import { verifyMobileAccessToken } from "~/modules/auth/service.server";
 import { ShelfError } from "~/utils/error";
 import {
   type PermissionAction,
   type PermissionEntity,
 } from "~/utils/permissions/permission.data";
 import { validatePermission } from "~/utils/permissions/permission.validator.server";
+import { parseRoles } from "~/utils/roles";
 import { canUseAudits, canUseBarcodes } from "~/utils/subscription.server";
 
 /**
- * Validates a Supabase JWT from the Authorization header and returns the
+ * Validates a JWT from the Authorization header and returns the
  * authenticated user's database record.
  *
  * Used exclusively by mobile API routes. The webapp's cookie-based session
@@ -29,34 +30,20 @@ export async function requireMobileAuth(request: Request) {
   }
 
   const token = authHeader.slice(7);
+  const payload = verifyMobileAccessToken(token);
 
-  // Validate the JWT with Supabase Admin
-  const {
-    data: { user: authUser },
-    error,
-  } = await getSupabaseAdmin().auth.getUser(token);
-
-  if (error || !authUser) {
+  if (!payload) {
     throw new ShelfError({
-      cause: error,
+      cause: null,
       message: "Invalid or expired token",
       label: "Auth",
       status: 401,
     });
   }
 
-  if (!authUser.email) {
-    throw new ShelfError({
-      cause: null,
-      message: "User account has no email address",
-      label: "Auth",
-      status: 400,
-    });
-  }
-
   // Get the database user record — exclude soft-deleted users
   const user = await db.user.findUnique({
-    where: { email: authUser.email },
+    where: { id: payload.userId },
     select: {
       id: true,
       email: true,
@@ -77,9 +64,12 @@ export async function requireMobileAuth(request: Request) {
     });
   }
 
-  // Strip deletedAt from the returned object
   const { deletedAt: _, ...safeUser } = user;
-  return { user: safeUser, authUser };
+  // Keep authUser shape compatible with call sites that read authUser.email
+  return {
+    user: safeUser,
+    authUser: { id: payload.userId, email: payload.email },
+  };
 }
 
 /**
@@ -96,8 +86,6 @@ export async function getUserOrganizations(userId: string) {
           name: true,
           type: true,
           imageId: true,
-          barcodesEnabled: true,
-          auditsEnabled: true,
         },
       },
     },
@@ -205,7 +193,7 @@ export async function getMobileUserContext(
     select: {
       roles: true,
       organization: {
-        select: { barcodesEnabled: true, auditsEnabled: true },
+        select: { id: true },
       },
     },
   });
@@ -223,7 +211,7 @@ export async function getMobileUserContext(
     // why: roles is an array but we always operate on the first role; mirror
     // the convention used in roles.server.ts and invite/service.server.ts so
     // an empty array doesn't surface as `undefined` to downstream callers.
-    role: userOrg.roles[0] ?? OrganizationRoles.BASE,
+    role: parseRoles(userOrg.roles)[0] ?? OrganizationRoles.BASE,
     canUseBarcodes: canUseBarcodes(userOrg.organization),
     canUseAudits: canUseAudits(userOrg.organization),
   };

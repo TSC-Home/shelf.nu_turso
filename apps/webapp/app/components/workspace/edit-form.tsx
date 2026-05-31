@@ -3,6 +3,7 @@ import {
   type Currency,
   OrganizationType,
   type QrIdDisplayPreference,
+  LabelTemplate,
 } from "@prisma/client";
 import { useAtom, useAtomValue } from "jotai";
 import { useFetcher, useLoaderData } from "react-router";
@@ -53,6 +54,12 @@ export const EditGeneralWorkspaceSettingsFormSchema = (
         return value === "on";
       })
       .optional(),
+    labelBrandingText: z.string().optional(),
+    labelCustomText: z.string().optional(),
+    labelTemplate: z
+      .nativeEnum(LabelTemplate)
+      .optional()
+      .default(LabelTemplate.SQUARE),
   });
 
 export const WorkspaceEditForms = ({
@@ -260,6 +267,87 @@ const WorkspaceGeneralEditForms = ({
               </p>
             </div>
           </div>
+        </FormRow>
+
+        <FormRow
+          rowLabel={"Label branding text"}
+          className={"border-b-0"}
+          subHeading={
+            <p>
+              Custom text shown at the bottom of QR and barcode labels. Replaces
+              "Powered by shelf.nu" when set.
+            </p>
+          }
+        >
+          <Input
+            label="Label branding text"
+            hideLabel
+            name={zo.fields.labelBrandingText()}
+            defaultValue={organization.labelBrandingText ?? ""}
+            placeholder="e.g. Powered by AcmeCorp"
+            className="w-full"
+            disabled={disabled}
+          />
+        </FormRow>
+
+        <FormRow
+          rowLabel={"Label template"}
+          className={"border-b-0"}
+          subHeading={
+            <p>
+              Choose the label layout used when downloading QR codes. The
+              horizontal template is optimised for
+              50&nbsp;mm&nbsp;×&nbsp;30&nbsp;mm labels.
+            </p>
+          }
+        >
+          <div className="flex flex-col gap-2">
+            <label className="flex cursor-pointer items-center gap-2 text-sm">
+              <input
+                type="radio"
+                name={zo.fields.labelTemplate()}
+                value={LabelTemplate.SQUARE}
+                defaultChecked={
+                  (organization.labelTemplate ?? LabelTemplate.SQUARE) ===
+                  LabelTemplate.SQUARE
+                }
+              />
+              Square (default)
+            </label>
+            <label className="flex cursor-pointer items-center gap-2 text-sm">
+              <input
+                type="radio"
+                name={zo.fields.labelTemplate()}
+                value={LabelTemplate.HORIZONTAL_50X30}
+                defaultChecked={
+                  organization.labelTemplate === LabelTemplate.HORIZONTAL_50X30
+                }
+              />
+              Horizontal 50&nbsp;mm&nbsp;×&nbsp;30&nbsp;mm
+            </label>
+          </div>
+        </FormRow>
+
+        <FormRow
+          rowLabel={"Label custom text"}
+          className={"border-b-0"}
+          subHeading={
+            <p>
+              Additional text shown on the right side of the horizontal label
+              (e.g. department or location). Only used with the horizontal
+              template.
+            </p>
+          }
+        >
+          <Input
+            label="Label custom text"
+            hideLabel
+            name={zo.fields.labelCustomText()}
+            defaultValue={organization.labelCustomText ?? ""}
+            placeholder="e.g. Warehouse A"
+            className="w-full"
+            disabled={disabled}
+          />
         </FormRow>
 
         <div className="text-right">

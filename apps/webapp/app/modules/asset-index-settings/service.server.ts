@@ -1,9 +1,5 @@
-import {
-  AssetIndexMode,
-  OrganizationRoles,
-  type CustomField,
-  type Prisma,
-} from "@prisma/client";
+import type { OrganizationRoles } from "@prisma/client";
+import { AssetIndexMode, type CustomField, type Prisma } from "@prisma/client";
 import type { ITXClientDenyList } from "@prisma/client/runtime/library";
 import type { ExtendedPrismaClient } from "~/database/db.server";
 import { db } from "~/database/db.server";
@@ -19,20 +15,14 @@ import { getOrganizationById } from "../organization/service.server";
 
 /**
  * Derive the default asset index mode for a given organization role.
- * BASE and SELF_SERVICE should remain in simple mode; elevated roles default to advanced.
+ * Always returns SIMPLE in this self-hosted SQLite fork because the ADVANCED
+ * query uses PostgreSQL-specific raw SQL (jsonb_agg, ILIKE, ::type casts,
+ * LATERAL JOIN) that is incompatible with SQLite/libSQL.
  */
 function getDefaultModeForRole(
-  role?: OrganizationRoles | null
+  _role?: OrganizationRoles | null
 ): AssetIndexMode {
-  if (
-    !role ||
-    role === OrganizationRoles.BASE ||
-    role === OrganizationRoles.SELF_SERVICE
-  ) {
-    return AssetIndexMode.SIMPLE;
-  }
-
-  return AssetIndexMode.ADVANCED;
+  return AssetIndexMode.SIMPLE;
 }
 
 const label: ErrorLabel = "Asset Index Settings";
@@ -187,16 +177,8 @@ export async function ensureAssetIndexModeForRole({
     });
   }
 
-  if (
-    desiredMode === AssetIndexMode.ADVANCED &&
-    settings.mode !== AssetIndexMode.ADVANCED
-  ) {
-    settings = await client.assetIndexSettings.update({
-      where: { userId_organizationId: { userId, organizationId } },
-      data: { mode: AssetIndexMode.ADVANCED },
-    });
-  }
-
+  // SIMPLE mode is always used in the self-hosted SQLite fork;
+  // skip any promotion to ADVANCED.
   return settings;
 }
 
@@ -326,7 +308,8 @@ export async function updateAssetIndexSettingsAfterCfUpdate({
 
 /**
  * Removes a custom field column from every asset index configuration that belongs to an organization.
- * Uses a single SQL statement to efficiently filter the JSON columns payload for all matching rows.
+ * Fetches all settings for the org, filters the column in JS, and updates each row individually.
+ * SQLite-compatible replacement for the PostgreSQL jsonb_agg/jsonb_array_elements approach.
  */
 export async function removeCustomFieldFromAssetIndexSettings({
   customFieldName,
@@ -335,27 +318,36 @@ export async function removeCustomFieldFromAssetIndexSettings({
 }: {
   customFieldName: string;
   organizationId: string;
-  prisma?: Pick<Prisma.TransactionClient, "$executeRaw">;
+  /** Pass the active transaction client to commit atomically with the surrounding mutation. */
+  prisma?: Pick<ExtendedPrismaClient, "assetIndexSettings">;
 }) {
   const client = prisma ?? db;
 
   try {
     const columnName = `cf_${customFieldName}`;
 
-    await client.$executeRaw`
-      UPDATE "AssetIndexSettings" AS ais
-      SET "columns" = (
-        SELECT COALESCE(jsonb_agg(elem), '[]'::jsonb)
-        FROM jsonb_array_elements(ais."columns") elem
-        WHERE elem->>'name' <> ${columnName}
-      )
-      WHERE ais."organizationId" = ${organizationId}
-        AND EXISTS (
-          SELECT 1
-          FROM jsonb_array_elements(ais."columns") elem
-          WHERE elem->>'name' = ${columnName}
-        );
-    `;
+    const settings = await client.assetIndexSettings.findMany({
+      where: { organizationId },
+      select: { id: true, columns: true },
+    });
+
+    await Promise.all(
+      settings
+        .filter((s) =>
+          (s.columns as Column[]).some((col) => col.name === columnName)
+        )
+        .map((s) =>
+          client.assetIndexSettings.update({
+            // eslint-disable-next-line local-rules/require-org-scope-on-id-queries -- idor-safe: id comes from org-scoped findMany above
+            where: { id: s.id },
+            data: {
+              columns: (s.columns as Column[]).filter(
+                (col) => col.name !== columnName
+              ),
+            },
+          })
+        )
+    );
   } catch (cause) {
     throw new ShelfError({
       cause,

@@ -132,7 +132,14 @@ export default function Updates() {
                     <span className="text-sm text-gray-400">No URL</span>
                   )}
                 </Td>
-                <Td>{getRoleBadges(update.targetRoles)}</Td>
+                {/* SQLite: targetRoles is a JSON string — parse before passing */}
+                <Td>
+                  {getRoleBadges(
+                    typeof update.targetRoles === "string"
+                      ? (JSON.parse(update.targetRoles) as string[])
+                      : (update.targetRoles as unknown as string[])
+                  )}
+                </Td>
                 <Td className="text-sm">
                   <DateS date={update.publishDate} />
                 </Td>

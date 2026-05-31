@@ -172,7 +172,6 @@ export async function generateOrphanedCodes({
 
     return await db.qr.createMany({
       data: data,
-      skipDuplicates: true,
     });
   } catch (cause) {
     throw new ShelfError({
@@ -213,7 +212,6 @@ export async function generateUnclaimedCodesForPrint({
 
     await db.qr.createMany({
       data,
-      skipDuplicates: true,
     });
 
     return await db.qr.findMany({
@@ -339,7 +337,6 @@ async function getQrCodes({
     if (search) {
       where.id = {
         contains: search,
-        mode: "insensitive",
       };
     }
 

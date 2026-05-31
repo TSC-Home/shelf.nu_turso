@@ -68,7 +68,6 @@ export async function getCategories(params: {
     if (search) {
       where.name = {
         contains: search,
-        mode: "insensitive",
       };
     }
 
@@ -142,7 +141,7 @@ export async function createCategoriesIfNotExists({
       const trimmedCategory = (category as string).trim();
       const existingCategory = await db.category.findFirst({
         where: {
-          name: { equals: trimmedCategory, mode: "insensitive" },
+          name: { equals: trimmedCategory },
           organizationId,
         },
       });

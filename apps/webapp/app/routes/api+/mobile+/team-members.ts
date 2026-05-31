@@ -24,9 +24,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       where: {
         organizationId,
         deletedAt: null,
-        ...(search
-          ? { name: { contains: search, mode: "insensitive" as const } }
-          : {}),
+        ...(search ? { name: { contains: search } } : {}),
       },
       select: {
         id: true,

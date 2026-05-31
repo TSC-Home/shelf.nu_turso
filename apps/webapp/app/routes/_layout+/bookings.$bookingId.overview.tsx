@@ -174,8 +174,9 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
         where: {
           organizationId,
           OR: [
-            { useFor: { isEmpty: true } },
-            { useFor: { has: TagUseFor.BOOKING } },
+            // SQLite: useFor is a JSON string — use string-based filters
+            { useFor: { equals: "[]" } },
+            { useFor: { contains: `"${TagUseFor.BOOKING}"` } },
           ],
         },
         orderBy: { name: "asc" },

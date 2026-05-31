@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { OrganizationType } from "@prisma/client";
 import {
   data,

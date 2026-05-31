@@ -23,7 +23,8 @@ function mockUserOrg(roles: OrganizationRoles[]) {
     id: "uo-1",
     userId: USER_ID,
     organizationId: ORG_ID,
-    roles,
+    // SQLite: roles is stored as a JSON string
+    roles: JSON.stringify(roles),
     createdAt: new Date(),
     updatedAt: new Date(),
   });
@@ -34,7 +35,8 @@ function mockUpdateSuccess(newRole: OrganizationRoles) {
     id: "uo-1",
     userId: USER_ID,
     organizationId: ORG_ID,
-    roles: [newRole],
+    // SQLite: roles is stored as a JSON string
+    roles: JSON.stringify([newRole]),
     createdAt: new Date(),
     updatedAt: new Date(),
   });
@@ -125,6 +127,7 @@ describe("changeUserRole", () => {
     });
 
     expect(result.previousRole).toBe(OrganizationRoles.BASE);
+    // SQLite: roles is stored as a JSON string, not a Prisma array set operation
     expect(db.userOrganization.update).toHaveBeenCalledWith({
       where: {
         userId_organizationId: {
@@ -133,7 +136,7 @@ describe("changeUserRole", () => {
         },
       },
       data: {
-        roles: { set: [OrganizationRoles.ADMIN] },
+        roles: JSON.stringify([OrganizationRoles.ADMIN]),
       },
     });
   });

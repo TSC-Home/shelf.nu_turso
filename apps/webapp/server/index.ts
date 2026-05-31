@@ -2,12 +2,16 @@
 // It is important to import it as .js for this to work, even if the file is .ts
 import "./instrument.server.js";
 
+import fs from "node:fs";
+import path from "node:path";
+
 import type { AppLoadContext } from "react-router";
 import type { HonoServerOptions } from "react-router-hono-server/node";
 import { createHonoServer } from "react-router-hono-server/node";
 import { getSession, session } from "remix-hono/session";
-import { initEnv } from "~/utils/env";
+import { initEnv, STORAGE_DRIVER, UPLOAD_DIR } from "~/utils/env";
 import { ShelfError } from "~/utils/error";
+import { verifyLocalSignedUrl } from "~/utils/storage.server";
 import { runWithTabId } from "~/utils/tab-id.server";
 
 import { logger } from "./logger";
@@ -74,6 +78,49 @@ export default createHonoServer<ServerEnv>({
   defaultLogger: false,
   getLoadContext,
   configure: (server) => {
+    // Serve local file uploads at /uploads/{bucket}/{...path}
+    // Only registered when STORAGE_DRIVER=local; S3 URLs are served by the bucket directly.
+    if (STORAGE_DRIVER === "local") {
+      server.get("/uploads/:bucket/*", (c) => {
+        const bucket = c.req.param("bucket");
+        // Extract the rest of the path after /uploads/{bucket}/
+        const fullPath = c.req.path.replace(`/uploads/${bucket}/`, "");
+        const filePath = path.join(UPLOAD_DIR, bucket, fullPath);
+
+        // Validate HMAC signature when present (signed private files)
+        const sig = c.req.query("sig");
+        const exp = c.req.query("exp");
+
+        if (sig && exp) {
+          if (!verifyLocalSignedUrl(bucket, fullPath, sig, exp)) {
+            return c.text("Forbidden", 403);
+          }
+        }
+
+        if (!fs.existsSync(filePath)) {
+          return c.text("Not Found", 404);
+        }
+
+        const ext = path.extname(filePath).toLowerCase();
+        const mimeTypes: Record<string, string> = {
+          ".jpg": "image/jpeg",
+          ".jpeg": "image/jpeg",
+          ".png": "image/png",
+          ".webp": "image/webp",
+          ".gif": "image/gif",
+          ".svg": "image/svg+xml",
+          ".pdf": "application/pdf",
+        };
+        const contentType = mimeTypes[ext] ?? "application/octet-stream";
+
+        const buffer = fs.readFileSync(filePath);
+        return c.body(buffer, 200, {
+          "Content-Type": contentType,
+          "Cache-Control": "public, max-age=86400",
+        });
+      });
+    }
+
     // Measure total request duration (dev/staging only, skipped in production).
     // Registered first so it captures time spent in all downstream middleware.
     server.use("*", serverTiming());
@@ -178,6 +225,7 @@ export default createHonoServer<ServerEnv>({
           "/qr/:qrId/not-logged-in",
           "/qr/:qrId/contact-owner",
           "/api/mobile/*path", // Mobile companion app API (JWT auth, not cookie)
+          "/uploads/*path", // Local file storage (STORAGE_DRIVER=local)
         ],
       })
     );

@@ -7,6 +7,7 @@ import { updateOrganization } from "~/modules/organization/service.server";
 import { getUserByID } from "~/modules/user/service.server";
 import { makeShelfError } from "~/utils/error";
 import { payload } from "~/utils/http.server";
+import { parseRoles } from "~/utils/roles";
 
 export async function action({ context, request }: ActionFunctionArgs) {
   const authSession = context.getSession();
@@ -30,7 +31,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
       } satisfies Prisma.UserSelect,
     });
 
-    const userRoles = user.userOrganizations[0]?.roles || [];
+    const userRoles = parseRoles(user.userOrganizations[0]?.roles ?? "[]");
     const canRunMigration =
       userRoles.includes("OWNER") || userRoles.includes("ADMIN");
 

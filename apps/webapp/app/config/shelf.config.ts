@@ -1,9 +1,7 @@
 import {
   COLLECT_BUSINESS_INTEL,
   DISABLE_SIGNUP,
-  DISABLE_SSO,
   ENABLE_PREMIUM_FEATURES,
-  FREE_TRIAL_DAYS,
   GEOCODING_USER_AGENT,
   SEND_ONBOARDING_EMAIL,
   SHOW_HOW_DID_YOU_FIND_US,
@@ -13,9 +11,9 @@ import { Config } from "./types";
 export const config: Config = {
   sendOnboardingEmail: SEND_ONBOARDING_EMAIL || false,
   enablePremiumFeatures: ENABLE_PREMIUM_FEATURES || false,
-  freeTrialDays: Number(FREE_TRIAL_DAYS || 7),
+  freeTrialDays: 7,
   disableSignup: DISABLE_SIGNUP || false,
-  disableSSO: DISABLE_SSO || false,
+  disableSSO: false,
 
   logoPath: {
     fullLogo: "/static/images/logo-full-color(x2).png",

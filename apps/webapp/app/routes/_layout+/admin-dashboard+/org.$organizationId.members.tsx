@@ -8,6 +8,7 @@ import { db } from "~/database/db.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { makeShelfError } from "~/utils/error";
 import { payload, error, getParams } from "~/utils/http.server";
+import { parseRoles } from "~/utils/roles";
 import { requireAdmin } from "~/utils/roles.server";
 
 export const meta = () => [
@@ -105,7 +106,9 @@ export default function AdminOrgQrCodes() {
                   <SSOUserBadge sso={member.sso} userId={member.id} />
                 </span>
               </Td>
-              <Td>{member.userOrganizations[0].roles.join(" ,")}</Td>
+              <Td>
+                {parseRoles(member.userOrganizations[0].roles).join(" ,")}
+              </Td>
               <Td>
                 <DateS
                   date={member.createdAt}

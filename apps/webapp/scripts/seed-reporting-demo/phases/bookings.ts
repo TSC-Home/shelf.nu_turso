@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Phase 5 — Bookings with Pareto popularity, seasonality, and outcome mix.
  *

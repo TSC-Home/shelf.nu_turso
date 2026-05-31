@@ -73,6 +73,7 @@ import {
 import { userHasPermission } from "~/utils/permissions/permission.validator.client";
 import { hasPermission } from "~/utils/permissions/permission.validator.server";
 import { useBarcodePermissions } from "~/utils/permissions/use-barcode-permissions";
+import { parseRoles } from "~/utils/roles";
 import { requirePermission } from "~/utils/roles.server";
 import { tw } from "~/utils/tw";
 
@@ -152,9 +153,11 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
      * suffix and is stripped from the SSR bundle. Passing `roles` explicitly
      * avoids the validator's DB fallback lookup.
      */
-    const roles = userOrganizations.find(
+    const rolesRaw = userOrganizations.find(
       (o) => o.organization.id === organizationId
     )?.roles;
+    // SQLite: roles is a JSON string — parse before passing to hasPermission
+    const roles = rolesRaw !== undefined ? parseRoles(rolesRaw) : undefined;
 
     const canEditAsset = await hasPermission({
       userId,
@@ -887,7 +890,13 @@ export default function AssetOverview() {
                                   className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
                                 >
                                   <option value="">Select an option</option>
-                                  {(def.options as string[] | null)
+                                  {// SQLite: options is a JSON string — parse before use
+                                  (def.options != null
+                                    ? (JSON.parse(
+                                        def.options as string
+                                      ) as string[])
+                                    : null
+                                  )
                                     ?.filter(
                                       (o: string) => o !== null && o !== ""
                                     )

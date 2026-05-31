@@ -99,6 +99,7 @@ export async function action({ context, request }: LoaderFunctionArgs) {
     const { name, helpText, required, type, active, options, categories } =
       payload;
 
+    // SQLite stores options as JSON string; serialize before passing to service
     await createCustomField({
       name,
       helpText,
@@ -107,7 +108,7 @@ export async function action({ context, request }: LoaderFunctionArgs) {
       active,
       organizationId,
       userId: authSession.userId,
-      options,
+      options: options != null ? JSON.stringify(options) : undefined,
       categories,
     });
 

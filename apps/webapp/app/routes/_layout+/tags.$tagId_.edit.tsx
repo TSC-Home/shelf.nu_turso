@@ -176,10 +176,16 @@ export default function EditTag() {
             </div>
 
             <MultiSelect
-              defaultSelected={tag.useFor.map((useFor) => ({
-                label: useFor,
-                value: useFor,
-              }))}
+              defaultSelected={
+                // SQLite: useFor is stored as a JSON string — parse before mapping
+                (typeof tag.useFor === "string"
+                  ? (JSON.parse(tag.useFor) as string[])
+                  : (tag.useFor as unknown as string[])
+                ).map((useFor) => ({
+                  label: useFor,
+                  value: useFor,
+                }))
+              }
               name="useFor"
               items={tagUseFor}
               labelKey="label"

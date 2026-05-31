@@ -1,33 +1,21 @@
 import type { ReactNode } from "react";
 import {
-  TierId,
   type Asset,
   type Qr,
   type User,
-  type CustomTierLimit,
   OrganizationRoles,
   type UserBusinessIntel,
   type Prisma,
 } from "@prisma/client";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { data, useLoaderData, Link, useFetcher } from "react-router";
+import { data, useLoaderData, Link } from "react-router";
 
 import { z } from "zod";
-import { Form } from "~/components/custom-form";
-import FormRow from "~/components/forms/form-row";
-import Input from "~/components/forms/input";
-import { Switch } from "~/components/forms/switch";
-import { Button } from "~/components/shared/button";
 import { DateS } from "~/components/shared/date";
-import { Spinner } from "~/components/shared/spinner";
-import { SubscriptionsOverview } from "~/components/subscription/subscriptions-overview";
 import { Table, Td, Th, Tr } from "~/components/table";
 import { DeleteUser } from "~/components/user/delete-user";
 import { config } from "~/config/shelf.config";
 import { db } from "~/database/db.server";
-import { useDisabled } from "~/hooks/use-disabled";
-import { resetPersonalWorkspaceBranding } from "~/modules/organization/service.server";
-import { updateUserTierId } from "~/modules/tier/service.server";
 import { softDeleteUser, getUserByID } from "~/modules/user/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { sendNotification } from "~/utils/emitter/send-notification.server";
@@ -39,16 +27,8 @@ import {
   isDelete,
   parseData,
 } from "~/utils/http.server";
+import { parseRoles } from "~/utils/roles";
 import { requireAdmin } from "~/utils/roles.server";
-import type { CustomerWithSubscriptions } from "~/utils/stripe.server";
-import {
-  createStripeCustomer,
-  getOrCreateCustomerId,
-  getStripeCustomer,
-  getStripePricesAndProducts,
-  getCustomerSubscriptionsWithProducts,
-} from "~/utils/stripe.server";
-import { resolveUserDisplayName } from "~/utils/user";
 
 export const meta = () => [{ title: appendToMetaTitle("User details") }];
 
@@ -86,21 +66,9 @@ export const loader = async ({ context, params }: LoaderFunctionArgs) => {
         profilePicture: true,
         createdAt: true,
         updatedAt: true,
-        tierId: true,
-        skipSubscriptionCheck: true,
-        customerId: true,
-        usedFreeTrial: true,
         sso: true,
         onboarded: true,
         createdWithInvite: true,
-        hasUnpaidInvoice: true,
-        warnForNoPaymentMethod: true,
-        customTierLimit: {
-          select: {
-            maxOrganizations: true,
-            isEnterprise: true,
-          },
-        },
         qrCodes: {
           orderBy: { createdAt: "desc" },
           select: {
@@ -166,7 +134,7 @@ export const loader = async ({ context, params }: LoaderFunctionArgs) => {
       (uo) =>
         uo.organization.enabledSso &&
         uo.organization.ssoDetails &&
-        uo.roles.some((role) => role === OrganizationRoles.OWNER)
+        parseRoles(uo.roles).some((role) => role === OrganizationRoles.OWNER)
     );
 
     /** Process the data you already have - no second query needed! */
@@ -198,27 +166,10 @@ export const loader = async ({ context, params }: LoaderFunctionArgs) => {
       {} as Record<string, number>
     );
 
-    /** Get the Stripe customer */
-    const customerId = premiumIsEnabled
-      ? await getOrCreateCustomerId(user)
-      : null;
-    const customer = customerId
-      ? ((await getStripeCustomer(customerId)) as CustomerWithSubscriptions)
-      : null;
-
-    /* Get the prices, products, and subscriptions from Stripe */
-    const [prices, subscriptionsWithProducts] = await Promise.all([
-      getStripePricesAndProducts(),
-      customerId ? getCustomerSubscriptionsWithProducts(customerId) : [],
-    ]);
-
     return payload({
       user,
       organizations: userOrganizations.map((uo) => uo.organization),
       ssoUsersByDomain,
-      customer,
-      subscriptionsWithProducts,
-      prices,
       premiumIsEnabled,
     });
   } catch (cause) {
@@ -250,75 +201,11 @@ export const action = async ({
     const { intent } = parseData(
       await request.clone().formData(),
       z.object({
-        intent: z.enum([
-          "updateTier",
-          "updateCustomTierDetails",
-          "createCustomerId",
-          "deleteUser",
-          "toggleSubscriptionCheck",
-          "toggleBooleanField",
-        ]),
+        intent: z.enum(["deleteUser"]),
       })
     );
 
     switch (intent) {
-      case "updateTier": {
-        const { tierId } = parseData(
-          await request.formData(),
-          z.object({
-            tierId: z.nativeEnum(TierId),
-          })
-        );
-
-        // Get current tier before updating
-        const currentUser = await db.user.findUniqueOrThrow({
-          where: { id: shelfUserId },
-          select: { tierId: true },
-        });
-
-        const user = await updateUserTierId(shelfUserId, tierId);
-
-        // Reset personal workspace branding when downgrading from Plus to Free
-        if (currentUser.tierId === TierId.tier_1 && tierId === TierId.free) {
-          await resetPersonalWorkspaceBranding(shelfUserId);
-        }
-
-        sendNotification({
-          title: "Tier updated",
-          message: `The user's tier has been updated successfully to ${user.tierId}`,
-          icon: { name: "check", variant: "success" },
-          senderId: userId,
-        });
-
-        break;
-      }
-      case "updateCustomTierDetails": {
-        const { maxOrganizations, isEnterprise } = parseData(
-          await request.formData(),
-          z.object({
-            maxOrganizations: z.string().transform((val) => +val),
-            isEnterprise: z
-              .string()
-              .optional()
-              .transform((val) => (val === "on" ? true : false)),
-          })
-        );
-
-        await db.customTierLimit.upsert({
-          where: { userId: shelfUserId },
-          create: {
-            userId: shelfUserId,
-            maxOrganizations,
-            isEnterprise,
-          },
-          update: {
-            maxOrganizations,
-            isEnterprise,
-          },
-        });
-
-        break;
-      }
       case "deleteUser":
         if (isDelete(request)) {
           await softDeleteUser(shelfUserId);
@@ -332,70 +219,6 @@ export const action = async ({
           return payload({ success: true });
         }
         break;
-      case "createCustomerId": {
-        const user = await getUserByID(shelfUserId, {
-          select: {
-            id: true,
-            email: true,
-            firstName: true,
-            lastName: true,
-            displayName: true,
-          } satisfies Prisma.UserSelect,
-        });
-        await createStripeCustomer({
-          email: user.email,
-          name: resolveUserDisplayName(user),
-          userId: user.id,
-        });
-        return payload(null);
-      }
-      case "toggleSubscriptionCheck": {
-        const { skipSubscriptionCheck } = parseData(
-          await request.formData(),
-          z.object({
-            skipSubscriptionCheck: z.coerce.boolean(),
-          })
-        );
-
-        await db.user.update({
-          where: { id: shelfUserId },
-          data: { skipSubscriptionCheck },
-          select: { id: true },
-        });
-
-        sendNotification({
-          title: "Subscription check updated",
-          message: `The user's subscription check has been ${
-            skipSubscriptionCheck ? "disabled" : "enabled"
-          } successfully`,
-          icon: { name: "check", variant: "success" },
-          senderId: userId,
-        });
-        break;
-      }
-      case "toggleBooleanField": {
-        const { fieldName, fieldValue } = parseData(
-          await request.formData(),
-          z.object({
-            fieldName: z.enum(["hasUnpaidInvoice", "warnForNoPaymentMethod"]),
-            fieldValue: z.string().transform((val) => val === "true"),
-          })
-        );
-
-        await db.user.update({
-          where: { id: shelfUserId },
-          data: { [fieldName]: fieldValue },
-          select: { id: true },
-        });
-
-        sendNotification({
-          title: "Field updated",
-          message: `${fieldName} has been set to ${fieldValue}`,
-          icon: { name: "check", variant: "success" },
-          senderId: userId,
-        });
-        break;
-      }
     }
 
     return payload(null);
@@ -427,57 +250,11 @@ type LoaderBusinessIntel = Pick<
 function UserFieldValue({
   fieldKey,
   value,
-  user,
-  premiumIsEnabled,
 }: {
   fieldKey: keyof LoaderUser;
   value: LoaderUser[keyof LoaderUser];
-  user: LoaderUser;
-  premiumIsEnabled: boolean;
 }): ReactNode {
   switch (fieldKey) {
-    case "tierId":
-      return <TierUpdateForm tierId={user.tierId} />;
-    case "customerId":
-      if (!premiumIsEnabled) return null;
-      return !value ? (
-        <Form className="inline-block" method="POST">
-          <input type="hidden" name="intent" value="createCustomerId" />
-          <Button type="submit" variant="link" size="sm">
-            Create customer ID
-          </Button>
-        </Form>
-      ) : (
-        <>
-          <Button
-            to={`https://dashboard.stripe.com/customers/${value}`}
-            target="_blank"
-            variant={"block-link"}
-          >
-            {value}
-          </Button>
-        </>
-      );
-    case "skipSubscriptionCheck":
-      return (
-        <SubscriptionCheckUpdateForm
-          skipSubscriptionCheck={user.skipSubscriptionCheck}
-        />
-      );
-    case "hasUnpaidInvoice":
-      return (
-        <BooleanToggleForm
-          fieldName="hasUnpaidInvoice"
-          fieldValue={user.hasUnpaidInvoice}
-        />
-      );
-    case "warnForNoPaymentMethod":
-      return (
-        <BooleanToggleForm
-          fieldName="warnForNoPaymentMethod"
-          fieldValue={user.warnForNoPaymentMethod}
-        />
-      );
     case "createdAt":
     case "updatedAt":
       return <DateS date={value as string | Date} />;
@@ -512,19 +289,8 @@ function BusinessIntelValue({
 }
 
 export default function Area51UserPage() {
-  const {
-    user,
-    organizations,
-    ssoUsersByDomain,
-    customer,
-    subscriptionsWithProducts,
-    prices,
-    premiumIsEnabled,
-  } = useLoaderData<typeof loader>();
-  const hasCustomTier =
-    user?.tierId === "custom" && user?.customTierLimit !== null;
-
-  const hasSubscription = (customer?.subscriptions?.data?.length ?? 0) > 0;
+  const { user, organizations, ssoUsersByDomain } =
+    useLoaderData<typeof loader>();
 
   return user ? (
     <div>
@@ -539,12 +305,7 @@ export default function Area51UserPage() {
               {user
                 ? Object.entries(user)
                     .filter(
-                      ([k, _v]) =>
-                        ![
-                          "qrCodes",
-                          "customTierLimit",
-                          "businessIntel",
-                        ].includes(k)
+                      ([k, _v]) => !["qrCodes", "businessIntel"].includes(k)
                     )
                     .map(([key, value]) => (
                       <li key={key}>
@@ -552,8 +313,6 @@ export default function Area51UserPage() {
                         <UserFieldValue
                           fieldKey={key as keyof LoaderUser}
                           value={value}
-                          user={user}
-                          premiumIsEnabled={premiumIsEnabled}
                         />
                       </li>
                     ))
@@ -578,26 +337,8 @@ export default function Area51UserPage() {
             ) : null}
           </div>
 
-          {hasCustomTier && (
-            <div className="flex w-[400px] flex-col gap-2 bg-gray-200 p-4">
-              <CustomTierDetailsForm customTierLimit={user.customTierLimit!} />
-            </div>
-          )}
           <div>
             <SsoUsersByDomainTable ssoUsersByDomain={ssoUsersByDomain} />
-          </div>
-          <div>
-            <h3>User subscriptions</h3>
-            {!hasSubscription ? (
-              <div>No subscription found</div>
-            ) : (
-              <SubscriptionsOverview
-                customer={customer}
-                subscriptions={subscriptionsWithProducts}
-                prices={prices}
-                organizations={organizations}
-              />
-            )}
           </div>
         </div>
       </div>
@@ -650,156 +391,6 @@ export default function Area51UserPage() {
       </div>
     </div>
   ) : null;
-}
-
-function TierUpdateForm({ tierId }: { tierId: TierId }) {
-  const fetcher = useFetcher();
-  const disabled = useDisabled(fetcher);
-  return (
-    <fetcher.Form
-      method="post"
-      onChange={(e) => {
-        const form = e.currentTarget;
-        void fetcher.submit(form);
-      }}
-      className="inline-flex items-center gap-2"
-    >
-      <input type="hidden" name="intent" value="updateTier" />
-
-      <select
-        style={{ all: "revert" }}
-        disabled={disabled}
-        defaultValue={tierId}
-        name="tierId"
-      >
-        {Object.keys(TierId).map((tier) => (
-          <option key={tier} value={tier}>
-            {tier}
-          </option>
-        ))}
-      </select>
-      {disabled && <Spinner />}
-    </fetcher.Form>
-  );
-}
-
-function SubscriptionCheckUpdateForm({
-  skipSubscriptionCheck,
-}: {
-  skipSubscriptionCheck: boolean;
-}) {
-  const fetcher = useFetcher();
-  const disabled = useDisabled(fetcher);
-  return (
-    <fetcher.Form
-      method="post"
-      onChange={(e) => {
-        const form = e.currentTarget;
-        void fetcher.submit(form);
-      }}
-      className="inline-flex items-center gap-2"
-    >
-      <input type="hidden" name="intent" value="toggleSubscriptionCheck" />
-
-      <input
-        type="checkbox"
-        name="skipSubscriptionCheck"
-        defaultChecked={skipSubscriptionCheck}
-        disabled={disabled}
-      />
-    </fetcher.Form>
-  );
-}
-
-function BooleanToggleForm({
-  fieldName,
-  fieldValue,
-}: {
-  fieldName: string;
-  fieldValue: boolean;
-}) {
-  const fetcher = useFetcher();
-  const disabled = useDisabled(fetcher);
-  return (
-    <fetcher.Form
-      method="post"
-      onChange={(e) => {
-        const form = e.currentTarget;
-        void fetcher.submit(form);
-      }}
-      className="inline-flex items-center gap-2"
-    >
-      <input type="hidden" name="intent" value="toggleBooleanField" />
-      <input type="hidden" name="fieldName" value={fieldName} />
-
-      <select
-        style={{ all: "revert" }}
-        disabled={disabled}
-        defaultValue={String(fieldValue)}
-        name="fieldValue"
-      >
-        <option value="true">true</option>
-        <option value="false">false</option>
-      </select>
-      {disabled && <Spinner />}
-    </fetcher.Form>
-  );
-}
-
-function CustomTierDetailsForm({
-  customTierLimit,
-}: {
-  customTierLimit: Pick<CustomTierLimit, "maxOrganizations" | "isEnterprise">;
-}) {
-  return (
-    <div>
-      <h4>Custom tier details</h4>
-      <p>
-        NOTE: We have more fields but for custom tier for now, the only relevant
-        one is number of workspaces so I only added this to form so we can ship
-        faster. Fields that are not added are: <b>canImportAssets</b>,
-        <b>canExportAssets</b>, <b>maxCustomFields</b>
-      </p>
-      <Form method="post">
-        <FormRow
-          rowLabel="Is Enterprise?"
-          className="block border-b-0 pb-0 [&>div]:lg:basis-auto"
-        >
-          <div className="flex items-center gap-3">
-            <Switch
-              name={"isEnterprise"}
-              defaultChecked={customTierLimit.isEnterprise}
-            />
-          </div>
-        </FormRow>
-
-        <FormRow
-          rowLabel={"Max workspaces (organizations)"}
-          className="block border-b-0 pb-0 [&>div]:lg:basis-auto"
-          subHeading={
-            "How many workspaces should this user be allowed to create/own? Keep in mind that the user always has 1 Personal workspace so you need to do the desired number + 1."
-          }
-          required
-        >
-          <Input
-            label="Max workspaces (organizations)"
-            name="maxOrganizations"
-            type="number"
-            min={1}
-            max={1000}
-            hideLabel
-            className="disabled my-2 w-full"
-            defaultValue={customTierLimit.maxOrganizations}
-            required
-          />
-        </FormRow>
-
-        <Button type="submit" name="intent" value="updateCustomTierDetails">
-          Save
-        </Button>
-      </Form>
-    </div>
-  );
 }
 
 interface SsoUsersByDomainTableProps {

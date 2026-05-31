@@ -109,7 +109,6 @@ export async function createTeamMemberIfNotExists({
           // Use case-insensitive comparison via Prisma's mode option
           name: {
             equals: teamMember as string,
-            mode: "insensitive",
           },
         },
       });
@@ -167,7 +166,6 @@ export async function getTeamMembers(params: {
     if (search) {
       where.name = {
         contains: search,
-        mode: "insensitive",
       };
     }
 
@@ -806,9 +804,11 @@ export async function getTeamMembersForNotify({
           userOrganizations: {
             some: {
               organizationId,
-              roles: {
-                hasSome: [OrganizationRoles.ADMIN, OrganizationRoles.OWNER],
-              },
+              // SQLite: roles is a JSON string, use OR + contains for membership
+              OR: [
+                { roles: { contains: `"${OrganizationRoles.ADMIN}"` } },
+                { roles: { contains: `"${OrganizationRoles.OWNER}"` } },
+              ],
             },
           },
         },

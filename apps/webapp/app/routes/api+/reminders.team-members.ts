@@ -52,7 +52,12 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
                 some: {
                   AND: [
                     { organizationId },
-                    { roles: { hasSome: ["ADMIN", "OWNER"] } },
+                    {
+                      OR: [
+                        { roles: { contains: '"ADMIN"' } },
+                        { roles: { contains: '"OWNER"' } },
+                      ],
+                    },
                   ],
                 },
               },

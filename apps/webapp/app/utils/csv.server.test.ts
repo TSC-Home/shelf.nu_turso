@@ -364,7 +364,6 @@ describe("buildCsvExportDataFromAssets", () => {
       columns: columns as any,
       currentOrganization: {
         id: "org-1",
-        barcodesEnabled: false,
         currency: "USD",
       },
       request: baseRequest,

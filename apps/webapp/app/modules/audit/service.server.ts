@@ -986,15 +986,15 @@ export async function getAssetsForAuditSession({
     if (search) {
       const searchTerm = search.toLowerCase().trim();
       where.OR = [
-        { title: { contains: searchTerm, mode: "insensitive" } },
+        { title: { contains: searchTerm } },
         {
           category: {
-            name: { contains: searchTerm, mode: "insensitive" },
+            name: { contains: searchTerm },
           },
         },
         {
           location: {
-            name: { contains: searchTerm, mode: "insensitive" },
+            name: { contains: searchTerm },
           },
         },
       ];
@@ -1897,8 +1897,8 @@ export async function getAuditsForOrganization(params: {
     // Add search filter
     if (search) {
       where.OR = [
-        { name: { contains: search, mode: "insensitive" } },
-        { description: { contains: search, mode: "insensitive" } },
+        { name: { contains: search } },
+        { description: { contains: search } },
       ];
     }
 
@@ -2873,8 +2873,8 @@ export function getAuditWhereInput({
   const search = searchParams.get("s");
   if (search) {
     where.OR = [
-      { name: { contains: search, mode: "insensitive" } },
-      { description: { contains: search, mode: "insensitive" } },
+      { name: { contains: search } },
+      { description: { contains: search } },
     ];
   }
 

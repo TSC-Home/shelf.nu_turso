@@ -123,12 +123,13 @@ function expectTagToBeCreated({
   color: string;
   useFor: TagUseFor[];
 }): void {
+  // SQLite: useFor is serialized as a JSON string before writing to the DB
   expect(db.tag.create).toHaveBeenCalledWith({
     data: {
       name,
       description,
       color,
-      useFor,
+      useFor: JSON.stringify(useFor),
       user: {
         connect: {
           id: USER_ID,
@@ -158,6 +159,7 @@ function expectTagToBeUpdated({
   color: string;
   useFor?: TagUseFor[];
 }): void {
+  // SQLite: useFor is serialized as a JSON string (JSON.stringify(undefined) → undefined)
   expect(db.tag.update).toHaveBeenCalledWith({
     where: {
       id,
@@ -167,9 +169,7 @@ function expectTagToBeUpdated({
       name,
       description,
       color,
-      useFor: {
-        set: useFor,
-      },
+      useFor: JSON.stringify(useFor),
     },
   });
 }

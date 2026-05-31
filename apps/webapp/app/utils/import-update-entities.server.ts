@@ -113,7 +113,7 @@ export async function detectNewEntities(
       ? await db.category.findMany({
           where: {
             organizationId,
-            name: { in: categoryNamesArr, mode: "insensitive" },
+            name: { in: categoryNamesArr },
           },
           select: { name: true },
         })
@@ -132,7 +132,7 @@ export async function detectNewEntities(
       ? await db.location.findMany({
           where: {
             organizationId,
-            name: { in: locationNamesArr, mode: "insensitive" },
+            name: { in: locationNamesArr },
           },
           select: { name: true },
         })
@@ -151,7 +151,7 @@ export async function detectNewEntities(
       ? await db.tag.findMany({
           where: {
             organizationId,
-            name: { in: tagNamesArr, mode: "insensitive" },
+            name: { in: tagNamesArr },
           },
           select: { name: true },
         })
@@ -215,7 +215,7 @@ export async function batchResolveCategoryNames(
   const existing = await db.category.findMany({
     where: {
       organizationId,
-      name: { in: uniqueNames, mode: "insensitive" },
+      name: { in: uniqueNames },
     },
     select: { id: true, name: true },
   });
@@ -234,13 +234,12 @@ export async function batchResolveCategoryNames(
         userId,
         organizationId,
       })),
-      skipDuplicates: true,
     });
     // Re-fetch to get IDs
     const created = await db.category.findMany({
       where: {
         organizationId,
-        name: { in: missingNames, mode: "insensitive" },
+        name: { in: missingNames },
       },
       select: { id: true, name: true },
     });
@@ -288,7 +287,7 @@ export async function batchResolveLocationNames(
   const existing = await db.location.findMany({
     where: {
       organizationId,
-      name: { in: uniqueNames, mode: "insensitive" },
+      name: { in: uniqueNames },
     },
     select: { id: true, name: true },
   });
@@ -306,13 +305,12 @@ export async function batchResolveLocationNames(
         userId,
         organizationId,
       })),
-      skipDuplicates: true,
     });
     // Re-fetch to get IDs
     const created = await db.location.findMany({
       where: {
         organizationId,
-        name: { in: missingNames, mode: "insensitive" },
+        name: { in: missingNames },
       },
       select: { id: true, name: true },
     });
@@ -362,7 +360,7 @@ export async function resolveTagNamesToIds(
   const existingTags = await db.tag.findMany({
     where: {
       organizationId,
-      name: { in: uniqueNames, mode: "insensitive" },
+      name: { in: uniqueNames },
     },
     select: { id: true, name: true },
   });
@@ -381,14 +379,13 @@ export async function resolveTagNamesToIds(
         userId,
         organizationId,
       })),
-      skipDuplicates: true,
     });
 
     // Re-fetch to get IDs of newly created tags
     const newTags = await db.tag.findMany({
       where: {
         organizationId,
-        name: { in: toCreate, mode: "insensitive" },
+        name: { in: toCreate },
       },
       select: { id: true, name: true },
     });

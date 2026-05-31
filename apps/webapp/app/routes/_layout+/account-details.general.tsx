@@ -23,13 +23,13 @@ import {
   UserContactDetailsForm,
   UserContactDetailsFormSchema,
 } from "~/components/user/user-contact-form";
+import { db } from "~/database/db.server";
 import {
   changeEmailAddressHtmlEmail,
   changeEmailAddressTextEmail,
 } from "~/emails/change-user-email-address";
 
 import { sendEmail } from "~/emails/mail.server";
-import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import { refreshAccessToken } from "~/modules/auth/service.server";
 import {
   getUserByID,
@@ -304,102 +304,32 @@ export async function action({ context, request }: ActionFunctionArgs) {
           }
         );
 
-        // Generate email change link/OTP
-        const { data: linkData, error: generateError } =
-          await getSupabaseAdmin().auth.admin.generateLink({
-            type: "email_change_new",
-            email: email,
-            newEmail: newEmail,
-          });
+        // Direct email update — no OTP step needed in self-hosted mode
+        await updateUserEmail({ userId, currentEmail: email, newEmail });
 
-        if (generateError) {
-          const emailExists = generateError.code === "email_exists";
-          throw new ShelfError({
-            cause: generateError,
-            ...(emailExists && { title: "Email is already taken." }),
-            message: emailExists
-              ? "Please choose a different email address which is not already in use."
-              : "Failed to initiate email change",
-            additionalData: { userId, newEmail },
-            label: "Auth",
-            shouldBeCaptured: !emailExists,
-          });
-        }
-
-        // Send email with OTP using our email service
-        sendEmail({
-          to: newEmail,
-          subject: `🔐 Shelf verification code: ${linkData.properties.email_otp}`,
-          text: changeEmailAddressTextEmail({
-            otp: linkData.properties.email_otp,
-            user,
-          }),
-          html: await changeEmailAddressHtmlEmail(
-            linkData.properties.email_otp,
-            user
-          ),
+        // Invalidate all other sessions so other devices must re-authenticate
+        const { refreshToken } = authSession;
+        await db.userSession.deleteMany({
+          where: { userId, NOT: { refreshToken } },
         });
 
         sendNotification({
-          title: "Email update initiated",
-          message: "Please check your email for a confirmation code",
+          title: "Email updated",
+          message: "Your email address has been successfully updated.",
           icon: { name: "success", variant: "success" },
           senderId: userId,
         });
 
         return payload({
-          awaitingOtp: true,
-          newEmail, // We'll need this to show which email we're waiting for verification
+          awaitingOtp: false,
+          newEmail,
           success: true,
+          emailChanged: true,
         });
       }
       case "verifyEmailChange": {
-        if (parsedData.type !== "verifyEmailChange")
-          throw new Error("Invalid payload type");
-
-        const { otp, email: newEmail } = parsedData;
-
-        /** Just to make sure the user exists */
-        await getUserByID(userId, {
-          select: { id: true } satisfies Prisma.UserSelect,
-        });
-
-        // Attempt to verify the OTP
-        const { error: verifyError } = await getSupabaseAdmin().auth.verifyOtp({
-          email: newEmail,
-          token: otp,
-          type: "email_change",
-        });
-
-        if (verifyError) {
-          throw new ShelfError({
-            cause: verifyError,
-            message: "Invalid or expired verification code",
-            additionalData: { userId },
-            label: "Auth",
-          });
-        }
-
-        /** Update the user's email */
-        await updateUserEmail({ userId, currentEmail: email, newEmail });
-
-        /** Refresh the session so it has the up-to-date email */
-        const { refreshToken } = authSession;
-        const newSession = await refreshAccessToken(refreshToken);
-        context.setSession(newSession);
-        /** Destroy all other sessions */
-        await getSupabaseAdmin().auth.admin.signOut(
-          newSession.accessToken,
-          "others"
-        );
-
-        sendNotification({
-          title: "Email updated",
-          message: "Your email has been successfully updated",
-          icon: { name: "success", variant: "success" },
-          senderId: userId,
-        });
-
+        // No-op in self-hosted mode: email change is completed in the
+        // initiateEmailChange step without OTP verification.
         return payload({
           success: true,
           awaitingOtp: false,

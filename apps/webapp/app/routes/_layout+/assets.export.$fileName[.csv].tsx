@@ -35,7 +35,7 @@ export const loader = async ({ context, request }: LoaderFunctionArgs) => {
       getAssetIndexSettings({
         userId,
         organizationId,
-        canUseBarcodes: currentOrganization.barcodesEnabled ?? false,
+        canUseBarcodes: true, // field removed in self-hosted fork; always enabled
         role,
       }),
     ]);

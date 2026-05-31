@@ -147,6 +147,11 @@ export const RELAY_SMTP_KEY =
     isRequired: false,
   }) || "";
 
+export const SMTP_FROM =
+  getEnv("SMTP_FROM", {
+    isRequired: false,
+  }) || "";
+
 export const DATABASE_URL = getEnv("DATABASE_URL");
 export const DATABASE_AUTH_TOKEN =
   getEnv("DATABASE_AUTH_TOKEN", {

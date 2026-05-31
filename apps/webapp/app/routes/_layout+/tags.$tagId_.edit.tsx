@@ -1,4 +1,3 @@
-import { TagUseFor } from "@prisma/client";
 import type { LoaderFunctionArgs, MetaFunction } from "react-router";
 import { data, redirect, useActionData, useLoaderData } from "react-router";
 import { useZorm } from "react-zorm";
@@ -39,7 +38,12 @@ export const UpdateTagFormSchema = z.object({
     .string()
     .optional()
     .transform((value) => (value && value.length > 0 ? value.split(",") : []))
-    .pipe(z.array(z.nativeEnum(TagUseFor)).optional().default([])),
+    .pipe(
+      z
+        .array(z.enum(["ASSET", "BOOKING"]))
+        .optional()
+        .default([])
+    ),
 });
 
 const title = "Edit Tag";
@@ -69,7 +73,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       header,
       tag,
       colorFromServer: tag.color ?? undefined,
-      tagUseFor: Object.values(TagUseFor).map((useFor) => ({
+      tagUseFor: (["ASSET", "BOOKING"] as const).map((useFor) => ({
         label: formatEnum(useFor),
         value: useFor,
       })),

@@ -21,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx prettier --write \"$FILE_PATH\""
+            "command": "case \"$FILE_PATH\" in */build/*) ;; *) npx prettier --write \"$FILE_PATH\" ;; esac"
           }
         ]
       }

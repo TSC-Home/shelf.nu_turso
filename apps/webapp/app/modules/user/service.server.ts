@@ -235,34 +235,14 @@ export async function createUserOrAttachOrg({
     });
 
     // If no Prisma User exists, create one.
-    // First try creating a fresh auth account. If that fails (email already
-    // exists in Supabase from a previous unconfirmed signup), fall back to
-    // confirming the existing auth account. The invite JWT (sent to the
-    // user's email) serves as proof of email ownership.
+    // Create the DB user record first so that createEmailAuthAccount can find
+    // it when setting the password hash.
     if (!shelfUser?.id) {
-      let authAccount = await createEmailAuthAccount(email, password).catch(
-        () => null
-      );
-
-      if (!authAccount) {
-        authAccount = await confirmExistingAuthAccount(email, password).catch(
-          () => null
-        );
-      }
-
-      if (!authAccount) {
-        throw new ShelfError({
-          cause: null,
-          message:
-            "We are facing some issue with your account. " +
-            "Please try again or contact support.",
-          label,
-        });
-      }
+      const newUserId = generateId();
 
       const newUser = await createUser({
         email,
-        userId: authAccount.id,
+        userId: newUserId,
         username: randomUsernameFromEmail(email),
         organizationId,
         roles,
@@ -270,6 +250,9 @@ export async function createUserOrAttachOrg({
         lastName,
         createdWithInvite,
       });
+
+      // User record exists now — set the password hash.
+      await createEmailAuthAccount(email, password);
 
       await ensureAssetIndexModeForRole({
         userId: newUser.id,

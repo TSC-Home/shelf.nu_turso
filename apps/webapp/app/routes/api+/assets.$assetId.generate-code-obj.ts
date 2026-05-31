@@ -56,6 +56,7 @@ export async function loader({ context, params, request }: LoaderFunctionArgs) {
         barcodes: asset.barcodes,
         sequentialId: asset.sequentialId,
         showShelfBranding: currentOrganization.showShelfBranding,
+        createdAt: asset.createdAt,
       })
     );
   } catch (cause) {

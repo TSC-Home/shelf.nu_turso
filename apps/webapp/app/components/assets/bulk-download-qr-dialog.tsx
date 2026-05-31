@@ -103,6 +103,7 @@ export default function BulkDownloadQrDialog({
               sequentialId={asset.sequentialId}
               labelBrandingText={labelBrandingText}
               labelCustomText={labelCustomText}
+              createdAt={asset.createdAt}
             />
           ) : (
             <QrLabel
@@ -117,8 +118,8 @@ export default function BulkDownloadQrDialog({
       );
 
       const toBlobOptions = {
-        width: isHorizontal ? 500 : 300,
-        height: 300,
+        width: isHorizontal ? 600 : 300,
+        height: isHorizontal ? 360 : 300,
         backgroundColor: "white",
         style: {
           display: "flex",

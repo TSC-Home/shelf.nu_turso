@@ -114,6 +114,8 @@ interface CodePreviewProps {
   onRefetchData?: () => void; // Callback to refetch data when barcode is added
   sequentialId?: string | null;
   showShelfBranding?: boolean;
+  /** Asset creation date — forwarded to HorizontalQrLabel. */
+  createdAt?: Date | string | null;
 }
 
 // react-doctor:no-giant-component — deferred for follow-up refactor
@@ -129,6 +131,7 @@ export const CodePreview = ({
   onRefetchData,
   sequentialId,
   showShelfBranding,
+  createdAt,
 }: CodePreviewProps) => {
   const captureDivRef = useRef<HTMLImageElement>(null);
   const downloadBtnRef = useRef<HTMLAnchorElement>(null);
@@ -382,6 +385,7 @@ export const CodePreview = ({
               sequentialId={sequentialId}
               labelBrandingText={resolvedLabelBrandingText}
               labelCustomText={organization?.labelCustomText}
+              createdAt={createdAt}
             />
           ) : (
             <QrLabel
@@ -537,17 +541,33 @@ export const BarcodeLabel = React.forwardRef<HTMLDivElement, BarcodeLabelProps>(
 );
 
 /** Container style for the horizontal 50 mm × 30 mm label (5:3 aspect ratio). */
+/**
+ * Canvas is 600 × 360 px which maps 1:1 to 50 mm × 30 mm at ~300 DPI.
+ * Scale: 12 px per mm  →  font sizes below follow that grid.
+ */
 const HORIZONTAL_LABEL_STYLE: CSSProperties = {
-  width: "500px",
-  height: "300px",
+  width: "600px",
+  height: "360px",
   display: "flex",
   flexDirection: "row",
   alignItems: "stretch",
-  borderRadius: "4px",
-  border: "5px solid #E3E4E8",
   backgroundColor: "white",
   overflow: "hidden",
+  fontFamily:
+    "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif",
 };
+
+/** Format a date value as DD.MM.YYYY. */
+function formatLabelDate(date: Date | string | null | undefined): string {
+  if (!date) return "";
+  const d = typeof date === "string" ? new Date(date) : date;
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleDateString("de-DE", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  });
+}
 
 interface HorizontalQrLabelProps {
   data?: { qr?: QrDef };
@@ -558,12 +578,16 @@ interface HorizontalQrLabelProps {
   labelBrandingText?: string | null;
   /** Workspace-wide custom text shown above the branding footer. */
   labelCustomText?: string | null;
+  /** Asset creation date — shown as "Added DD.MM.YYYY" on the label. */
+  createdAt?: Date | string | null;
 }
 
 /**
  * Horizontal QR label — 50 mm × 30 mm.
  *
- * Layout: QR code on the left half, product name / ID / custom text on the right.
+ * Canvas: 600 × 360 px (12 px/mm at 300 DPI).
+ * Left column (38%): QR code, centred.
+ * Right column (62%): product name · ID · date · custom text · branding.
  */
 export const HorizontalQrLabel = React.forwardRef<
   HTMLDivElement,
@@ -576,6 +600,7 @@ export const HorizontalQrLabel = React.forwardRef<
     sequentialId,
     labelBrandingText,
     labelCustomText,
+    createdAt,
   } = props ?? {};
 
   const displayId =
@@ -583,66 +608,128 @@ export const HorizontalQrLabel = React.forwardRef<
       ? sequentialId
       : data?.qr?.id;
 
+  const formattedDate = formatLabelDate(createdAt);
+
   return (
     <div style={HORIZONTAL_LABEL_STYLE} ref={ref}>
-      {/* Left: QR code */}
+      {/* Left column — QR code */}
       <div
         style={{
-          width: "50%",
+          width: "38%",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          padding: "12px",
-          borderRight: "3px solid #E3E4E8",
+          padding: "16px",
+          borderRight: "2px solid #D1D5DB",
+          flexShrink: 0,
         }}
       >
-        <figure className="qr-code">
+        <figure className="qr-code" style={{ margin: 0 }}>
           <img
             src={data?.qr?.src}
             alt={`${data?.qr?.size}-shelf-qr-code.png`}
-            style={{ maxWidth: "100%", maxHeight: "100%" }}
+            style={{ width: "100%", height: "auto", display: "block" }}
           />
         </figure>
       </div>
 
-      {/* Right: product name, ID, custom text, branding */}
+      {/* Right column — all text */}
       <div
         style={{
-          width: "50%",
+          flex: 1,
           display: "flex",
           flexDirection: "column",
           justifyContent: "space-between",
-          padding: "14px 12px",
+          padding: "18px 16px 16px 18px",
           overflow: "hidden",
+          minWidth: 0,
         }}
       >
+        {/* Product name — up to 2 lines, 28 px ≈ 2.3 mm ≈ 6.6 pt */}
         <div
           style={{
-            fontSize: "13px",
+            fontSize: "30px",
             fontWeight: 700,
-            color: "black",
+            lineHeight: 1.2,
+            color: "#111827",
+            display: "-webkit-box",
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: "vertical",
             overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
           }}
         >
           {title}
         </div>
 
-        <div style={{ fontSize: "11px", fontWeight: 600, color: "#333" }}>
-          {displayId}
-        </div>
-
-        <div style={{ fontSize: "10px", color: "#555" }}>
-          {labelCustomText ? (
-            <div style={{ marginBottom: labelBrandingText ? "2px" : 0 }}>
-              {labelCustomText}
+        {/* ID + date block */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+          {displayId ? (
+            <div
+              style={{
+                fontSize: "22px",
+                fontWeight: 600,
+                color: "#374151",
+                letterSpacing: "0.02em",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {displayId}
             </div>
           ) : null}
-          {labelBrandingText ? (
-            <div style={{ color: "#888" }}>{labelBrandingText}</div>
+          {formattedDate ? (
+            <div
+              style={{
+                fontSize: "20px",
+                color: "#6B7280",
+              }}
+            >
+              {formattedDate}
+            </div>
           ) : null}
         </div>
+
+        {/* Footer — custom text + branding */}
+        {labelCustomText || labelBrandingText ? (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "3px",
+              borderTop: "1px solid #E5E7EB",
+              paddingTop: "8px",
+            }}
+          >
+            {labelCustomText ? (
+              <div
+                style={{
+                  fontSize: "18px",
+                  fontWeight: 500,
+                  color: "#4B5563",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {labelCustomText}
+              </div>
+            ) : null}
+            {labelBrandingText ? (
+              <div
+                style={{
+                  fontSize: "16px",
+                  color: "#9CA3AF",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {labelBrandingText}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </div>
   );

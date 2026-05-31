@@ -47,6 +47,7 @@ export function CodePreviewDialog({
     }>;
     sequentialId?: string | null;
     showShelfBranding?: boolean;
+    createdAt?: string | null;
   }>({
     api: `/api/${item.type === "asset" ? "assets" : "kits"}/${
       item.id
@@ -141,6 +142,7 @@ export function CodePreviewDialog({
                       item.type === "asset" ? item.sequentialId : undefined
                     }
                     showShelfBranding={data?.showShelfBranding}
+                    createdAt={data?.createdAt}
                   />
                 </Card>
               </When>

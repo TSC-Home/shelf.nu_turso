@@ -1,6 +1,6 @@
 services:
   shelf:
-    image: ghcr.io/${GITHUB_REPOSITORY:-your-org/shelf}:latest
+    image: ghcr.io/tsc-home/shelf.nu_turso:latest
     restart: unless-stopped
     ports:
       - "${PORT:-3000}:8080"

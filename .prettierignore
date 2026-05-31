@@ -4,6 +4,7 @@ node_modules
 apps/webapp/build
 apps/webapp/public/build
 apps/webapp/app/styles/tailwind.css
+**/build
 
 # Environment files
 .env

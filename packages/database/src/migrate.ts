@@ -18,13 +18,15 @@
 import { createClient } from "@libsql/client";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// process.argv[1] is the path to the executed file in both ESM (tsx) and CJS
+// (compiled bundle) contexts, unlike import.meta.url which esbuild cannot
+// reliably polyfill when targeting CJS.
+const scriptDir = path.dirname(path.resolve(process.argv[1]));
 
 // Load .env from the monorepo root (two levels above packages/database/)
-dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
+dotenv.config({ path: path.resolve(scriptDir, "../../../.env") });
 
 /** DDL for the Prisma-compatible migration tracking table. */
 const CREATE_MIGRATIONS_TABLE = `
@@ -133,7 +135,7 @@ async function main() {
   const applied = new Set(result.rows.map((r) => r.migration_name as string));
 
   // Discover migration directories, sorted lexicographically (chronological).
-  const migrationsDir = path.resolve(__dirname, "../prisma/migrations");
+  const migrationsDir = path.resolve(scriptDir, "../prisma/migrations");
   const entries = await readdir(migrationsDir, { withFileTypes: true });
   const dirs = entries
     .filter((e) => e.isDirectory())

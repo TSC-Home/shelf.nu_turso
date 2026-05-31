@@ -39,7 +39,7 @@ RUN turbo build --filter=@shelf/webapp
 # Compile the migration runner to a self-contained CJS bundle before stripping
 # devDependencies. dotenv (devDep) is bundled in; @libsql/client (prod dep)
 # stays external so its native bindings are resolved at runtime.
-RUN node node_modules/.bin/esbuild packages/database/src/migrate.ts \
+RUN node_modules/.bin/esbuild packages/database/src/migrate.ts \
       --bundle \
       --platform=node \
       --format=cjs \
